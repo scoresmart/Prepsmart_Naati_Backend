@@ -191,6 +191,20 @@ export async function listRapidReviews(req, res, next) {
       });
     }
 
+    // Admin-assigned plan — treat as subscribed
+    if (user.subscriptionPlan) {
+      return res.json({
+        success: true,
+        data: {
+          rapidReviews,
+          isSubscribed: true,
+          dailyLimit: null,
+          dailyDone: null,
+          dailyRemaining: null,
+        },
+      });
+    }
+
     const now = new Date();
     const sub = await Subscription.findOne({
       where: {

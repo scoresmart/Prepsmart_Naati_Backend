@@ -358,7 +358,7 @@ export async function listDialogues(req, res, next) {
         req.query.includeUserStats ?? req.query.include_user_stats ?? "0"
       ) === "1";
 
-    const user = await User.findByPk(userId, { attributes: ["id", "role"] });
+    const user = await User.findByPk(userId, { attributes: ["id", "role", "subscriptionPlan"] });
     if (!user)
       return res
         .status(404)
@@ -367,6 +367,9 @@ export async function listDialogues(req, res, next) {
     let isSubscribed = false;
 
     if (user.role === "admin") {
+      isSubscribed = true;
+    } else if (user.subscriptionPlan) {
+      // Admin-assigned plan — treat as subscribed
       isSubscribed = true;
     } else {
       if (!languageId)

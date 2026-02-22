@@ -16,7 +16,7 @@
         "express": "^4.19.2",
         "jsonwebtoken": "^9.0.2",
         "multer": "^2.0.2",
-        "mysql2": "^3.11.0",
+        "mysql2": "^3.17.4",
         "nodemailer": "^7.0.12",
         "openai": "^6.16.0",
         "resend": "^6.9.2",

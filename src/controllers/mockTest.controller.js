@@ -306,7 +306,7 @@ export const getMockTests = async (req, res, next) => {
         .status(400)
         .json({ success: false, message: "userId is required" });
 
-    const user = await User.findByPk(userId, { attributes: ["id", "role"] });
+    const user = await User.findByPk(userId, { attributes: ["id", "role", "subscriptionPlan"] });
     if (!user)
       return res
         .status(404)
@@ -326,6 +326,10 @@ export const getMockTests = async (req, res, next) => {
 
     if (user.role === "admin") {
       isSubscribed = true;
+    } else if (user.subscriptionPlan) {
+      // Admin-assigned plan — treat as subscribed
+      isSubscribed = true;
+      if (languageId) where.languageId = languageId;
     } else {
       if (!languageId)
         return res
