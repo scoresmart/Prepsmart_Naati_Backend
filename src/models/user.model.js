@@ -40,6 +40,8 @@ export const User = sequelize.define(
 
     resetOtpCode: { type: DataTypes.STRING(10), allowNull: true },
     resetOtpExpiresAt: { type: DataTypes.DATE, allowNull: true },
+
+    accountExpiry: { type: DataTypes.DATEONLY, allowNull: true, defaultValue: null },
   },
   {
     tableName: "users",

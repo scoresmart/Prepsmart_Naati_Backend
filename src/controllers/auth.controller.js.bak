@@ -4,7 +4,6 @@ import { generateOtp, otpExpiryDate, isOtpValid } from "../utils/otp.js";
 import { signJwt } from "../utils/jwt.js";
 import { env } from "../config/env.js";
 import sendEmailFunc, { sendOtpEmail, sendWelcomeEmail } from "../utils/email.js";
-
 function safeUser(user, language) {
   return {
     id: user.id,
@@ -15,14 +14,12 @@ function safeUser(user, language) {
       ? { id: language.id, name: language.name, langCode: language.langCode }
       : null,
     naatiCclExamDate: user.naatiCclExamDate,
-    accountExpiry: user.accountExpiry ?? null,
     isVerified: user.isVerified,
     createdAt: user.createdAt,
     updatedAt: user.updatedAt,
     role: user.role,
   };
 }
-
 async function getLanguageByCode(langCode) {
   if (!langCode) return null;
   return models.Language.findOne({
@@ -30,7 +27,6 @@ async function getLanguageByCode(langCode) {
     attributes: ["id", "name", "langCode"],
   });
 }
-
 export async function register(req, res, next) {
   try {
     const { name, email, phone, password, naatiCclExamDate } = req.body;
@@ -76,8 +72,29 @@ export async function register(req, res, next) {
       isVerified: false,
     });
 
-    // Send OTP verification email via Resend
-    sendOtpEmail(email, otp, "verify");
+    const html = `
+<div style="font-family:Arial,Helvetica,sans-serif; background:#f6f8fb; padding:24px;">
+  <div style="max-width:520px; margin:0 auto; background:#ffffff; border-radius:14px; padding:24px; border:1px solid #eef1f6;">
+    <h2 style="margin:0 0 10px; font-size:18px; color:#111827;">Verify your account</h2>
+    <p style="margin:0 0 18px; font-size:14px; color:#374151; line-height:1.6;">
+      Use the OTP below to verify your account. This code expires soon.
+    </p>
+    <div style="text-align:center; margin:18px 0 6px;">
+      <div style="display:inline-block; padding:12px 18px; border-radius:12px; background:#111827; color:#ffffff; font-size:22px; letter-spacing:6px; font-weight:700;">
+        ${otp}
+      </div>
+    </div>
+    <p style="margin:14px 0 0; font-size:12px; color:#6b7280;">
+      If you didn’t request this, you can ignore this email.
+    </p>
+    <p style="margin:16px 0 0; font-size:11px; color:#9ca3af;">
+      © ${new Date().getFullYear()} PrepSmart
+    </p>
+  </div>
+</div>
+`;
+
+    sendEmailFunc(email, "Verify your account", html);
 
     const data = { user: safeUser(user, language) };
     if (env.appEnv === "development") data.otp = otp;
@@ -116,7 +133,7 @@ export async function verifyOtp(req, res, next) {
     user.otpExpiresAt = null;
     await user.save();
 
-    // Send welcome email after successful verification via Resend
+    // Send welcome email after successful verification
     sendWelcomeEmail(email, user.name);
 
     const token = signJwt({ role: "user", userId: user.id });
@@ -152,10 +169,32 @@ export async function resendOtp(req, res, next) {
     user.otpCode = otp;
     user.otpExpiresAt = otpExpiryDate();
     await user.save();
+    const html = `
+    <div style="font-family:Arial,Helvetica,sans-serif; background:#f6f8fb; padding:24px;">
+      <div style="max-width:520px; margin:0 auto; background:#ffffff; border-radius:14px; padding:24px; border:1px solid #eef1f6;">
+        <h2 style="margin:0 0 10px; font-size:18px; color:#111827;">Verify your account</h2>
+        <p style="margin:0 0 18px; font-size:14px; color:#374151; line-height:1.6;">
+          Use the OTP below to verify your account. This code expires soon.
+        </p>
+    
+        <div style="text-align:center; margin:18px 0 6px;">
+          <div style="display:inline-block; padding:12px 18px; border-radius:12px; background:#111827; color:#ffffff; font-size:22px; letter-spacing:6px; font-weight:700;">
+            ${otp}
+          </div>
+        </div>
+    
+        <p style="margin:14px 0 0; font-size:12px; color:#6b7280;">
+          If you didn’t request this, you can ignore this email.
+        </p>
+    
+        <p style="margin:16px 0 0; font-size:11px; color:#9ca3af;">
+          © ${new Date().getFullYear()} PrepSmart
+        </p>
+      </div>
+    </div>
+    `;
 
-    // Send OTP verification email via Resend
-    sendOtpEmail(email, otp, "verify");
-
+    sendEmailFunc(email, "Verify your account", html);
     const data = {};
     if (env.appEnv === "development") data.otp = otp;
 
@@ -226,10 +265,32 @@ export async function forgotPassword(req, res, next) {
         .json({ success: false, message: "User not found" });
 
     const otp = generateOtp();
+    const html = `
+    <div style="font-family:Arial,Helvetica,sans-serif; background:#f6f8fb; padding:24px;">
+      <div style="max-width:520px; margin:0 auto; background:#ffffff; border-radius:14px; padding:24px; border:1px solid #eef1f6;">
+        <h2 style="margin:0 0 10px; font-size:18px; color:#111827;">Verify your account</h2>
+        <p style="margin:0 0 18px; font-size:14px; color:#374151; line-height:1.6;">
+          Use the OTP below to reset your password. This code expires soon.
+        </p>
+    
+        <div style="text-align:center; margin:18px 0 6px;">
+          <div style="display:inline-block; padding:12px 18px; border-radius:12px; background:#111827; color:#ffffff; font-size:22px; letter-spacing:6px; font-weight:700;">
+            ${otp}
+          </div>
+        </div>
+    
+        <p style="margin:14px 0 0; font-size:12px; color:#6b7280;">
+          If you didn’t request this, you can ignore this email.
+        </p>
+    
+        <p style="margin:16px 0 0; font-size:11px; color:#9ca3af;">
+          © ${new Date().getFullYear()} PrepSmart
+        </p>
+      </div>
+    </div>
+    `;
 
-    // Send reset OTP email via Resend
-    sendOtpEmail(email, otp, "reset");
-
+    sendEmailFunc(email, "Verify your account", html);
     user.resetOtpCode = otp;
     user.resetOtpExpiresAt = otpExpiryDate();
     await user.save();
@@ -287,30 +348,6 @@ export async function me(req, res, next) {
         .json({ success: false, message: "User not found" });
 
     return res.json({ success: true, data: { user: safeUser(user) } });
-  } catch (err) {
-    return next(err);
-  }
-}
-
-// Admin impersonation - sign in as any user
-export async function adminLoginAsUser(req, res, next) {
-  try {
-    const { userId } = req.body;
-    if (!userId)
-      return res.status(400).json({ success: false, message: "userId required" });
-
-    const user = await models.User.findByPk(userId);
-    if (!user)
-      return res.status(404).json({ success: false, message: "User not found" });
-
-    const language = await getLanguageByCode(user.preferredLanguage);
-    const token = signJwt({ role: user.role, userId: user.id });
-
-    return res.json({
-      success: true,
-      message: "Logged in as user",
-      data: { token, user: safeUser(user, language) },
-    });
   } catch (err) {
     return next(err);
   }
