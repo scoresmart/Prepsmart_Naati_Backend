@@ -172,9 +172,27 @@ export const computeResult = async (req, res, next) => {
         .status(404)
         .json({ success: false, message: "ExamAttempt not found" });
 
-    const segments = await SegmentAttempt.findAll({
+    const segmentAttempts = await SegmentAttempt.findAll({
       where: { examAttemptId: examAttemptId },
       order: [["createdAt", "ASC"]],
+    });
+
+    // Enrich each SegmentAttempt with original Segment data
+    const segmentIds = segmentAttempts.map(sa => sa.segmentId).filter(Boolean);
+    const originalSegments = segmentIds.length
+      ? await Segment.findAll({ where: { id: { [Op.in]: segmentIds } } })
+      : [];
+    const segmentMap = new Map(originalSegments.map(s => [Number(s.id), s]));
+
+    const segments = segmentAttempts.map(sa => {
+      const plain = typeof sa.get === "function" ? sa.get({ plain: true }) : sa;
+      const origSeg = segmentMap.get(Number(sa.segmentId));
+      if (origSeg) {
+        plain.questionAudioUrl = plain.questionAudioUrl || origSeg.audioUrl || null;
+        plain.suggestedAudioUrl = plain.suggestedAudioUrl || origSeg.suggestedAudioUrl || null;
+        plain.questionTranscript = plain.questionTranscript || origSeg.textContent || null;
+      }
+      return plain;
     });
 
     const averages = {

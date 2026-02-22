@@ -455,14 +455,81 @@ const toAzureLocales = (lang) => {
     ur: ["ur-PK"],
     vi: ["vi-VN"],
     cy: ["cy-GB"],
+    pa: ["pa-IN"],
+    gu: ["gu-IN"],
+    bn: ["bn-IN"],
+    te: ["te-IN"],
+    ml: ["ml-IN"],
   };
   return (map[s.toLowerCase()] || []).map(normalizeLocale).filter(Boolean);
+};
+
+const LANGUAGE_NAME_TO_CODE = {
+  hindi: "hi",
+  punjabi: "pa",
+  nepali: "ne",
+  mandarin: "zh",
+  chinese: "zh",
+  spanish: "es",
+  english: "en",
+  urdu: "ur",
+  tamil: "ta",
+  telugu: "te",
+  bengali: "bn",
+  bangla: "bn",
+  gujarati: "gu",
+  kannada: "kn",
+  malayalam: "ml",
+  marathi: "mr",
+  arabic: "ar",
+  persian: "fa",
+  farsi: "fa",
+  turkish: "tr",
+  korean: "ko",
+  japanese: "ja",
+  vietnamese: "vi",
+  thai: "th",
+  indonesian: "id",
+  malay: "ms",
+  russian: "ru",
+  french: "fr",
+  german: "de",
+  italian: "it",
+  portuguese: "pt",
+  dutch: "nl",
+  greek: "el",
+  polish: "pl",
+  czech: "cs",
+  romanian: "ro",
+  hungarian: "hu",
+  swedish: "sv",
+  danish: "da",
+  finnish: "fi",
+  norwegian: "no",
+  ukrainian: "uk",
+  serbian: "sr",
+  croatian: "hr",
+  bosnian: "bs",
+  bulgarian: "bg",
+  filipino: "tl",
+  tagalog: "tl",
+  sinhalese: "si",
+  sinhala: "si",
+  khmer: "km",
+  burmese: "my",
+  lao: "lo",
+  swahili: "sw",
 };
 
 const toLanguageCode = (language) => {
   const s = String(language || "").trim();
   if (!s) return null;
-  return s.split("-")[0] || null;
+  // If already a 2-letter code, return it
+  if (/^[a-z]{2}$/i.test(s)) return s.toLowerCase();
+  // If it's a locale like "pa-IN", extract the code
+  if (s.includes("-")) return s.split("-")[0].toLowerCase();
+  // Map language name to code
+  return LANGUAGE_NAME_TO_CODE[s.toLowerCase()] || s.toLowerCase();
 };
 
 const makeAzureSpeechBaseEndpoint = () => {
@@ -1088,6 +1155,11 @@ export const runAiExam = async (req, res, next) => {
         segmentId,
         audioUrl: userAudioUrl,
         userTranscription: studentTranscript,
+        referenceTranscript: referenceTranscript || null,
+        suggestedTranscript: suggestedTranscript || null,
+        questionAudioUrl: referenceAudioUrl || null,
+        suggestedAudioUrl: suggestedAudioUrl || null,
+        questionTranscript: segment.textContent || audioTranscript || null,
         aiScores: scores,
         accuracyScore: scores.accuracy_score,
         overallScore: scores.final_score,

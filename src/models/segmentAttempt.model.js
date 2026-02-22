@@ -123,6 +123,32 @@ const SegmentAttempt = sequelize.define(
     },
     language: { type: DataTypes.TEXT, allowNull: true },
 
+    referenceTranscript: {
+      type: DataTypes.TEXT,
+      allowNull: true,
+      field: "reference_transcript",
+    },
+    suggestedTranscript: {
+      type: DataTypes.TEXT,
+      allowNull: true,
+      field: "suggested_transcript",
+    },
+    questionAudioUrl: {
+      type: DataTypes.TEXT,
+      allowNull: true,
+      field: "question_audio_url",
+    },
+    suggestedAudioUrl: {
+      type: DataTypes.TEXT,
+      allowNull: true,
+      field: "suggested_audio_url",
+    },
+    questionTranscript: {
+      type: DataTypes.TEXT,
+      allowNull: true,
+      field: "question_transcript",
+    },
+
     repeatCount: {
       type: DataTypes.INTEGER,
       allowNull: false,
