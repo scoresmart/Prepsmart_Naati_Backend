@@ -2,17 +2,19 @@ import { env } from "../config/env.js";
 import { verifyJwt } from "../utils/jwt.js";
 
 export function requireAuth(req, res, next) {
-  if (env.appEnv === "development") return next();
-
   const header = req.headers.authorization || "";
   const token = header.startsWith("Bearer ") ? header.slice(7) : "";
 
-  if (!token) return res.status(401).json({ success: false, message: "Unauthorized" });
+  if (!token) {
+    if (env.appEnv === "development") return next();
+    return res.status(401).json({ success: false, message: "Unauthorized" });
+  }
 
   try {
     req.auth = verifyJwt(token);
     return next();
   } catch {
+    if (env.appEnv === "development") return next();
     return res.status(401).json({ success: false, message: "Invalid token" });
   }
 }
