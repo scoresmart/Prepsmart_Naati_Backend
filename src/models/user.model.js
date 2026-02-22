@@ -42,6 +42,7 @@ export const User = sequelize.define(
     resetOtpExpiresAt: { type: DataTypes.DATE, allowNull: true },
 
     accountExpiry: { type: DataTypes.DATEONLY, allowNull: true, defaultValue: null },
+    subscriptionPlan: { type: DataTypes.STRING(30), allowNull: true, defaultValue: null, field: "subscription_plan" },
   },
   {
     tableName: "users",

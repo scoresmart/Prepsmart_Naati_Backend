@@ -16,6 +16,7 @@ function safeUser(user, language) {
       : null,
     naatiCclExamDate: user.naatiCclExamDate,
     accountExpiry: user.accountExpiry ?? null,
+    subscriptionPlan: user.subscriptionPlan ?? null,
     isVerified: user.isVerified,
     createdAt: user.createdAt,
     updatedAt: user.updatedAt,
@@ -286,7 +287,8 @@ export async function me(req, res, next) {
         .status(404)
         .json({ success: false, message: "User not found" });
 
-    return res.json({ success: true, data: { user: safeUser(user) } });
+    const language = await getLanguageByCode(user.preferredLanguage);
+    return res.json({ success: true, data: { user: safeUser(user, language) } });
   } catch (err) {
     return next(err);
   }

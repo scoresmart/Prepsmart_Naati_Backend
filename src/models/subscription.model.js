@@ -43,6 +43,24 @@ export const Subscription = sequelize.define(
       defaultValue: false,
       field: "cancel_at_period_end"
     },
+
+    stripeCustomerId: {
+      type: DataTypes.STRING(64),
+      allowNull: true,
+      field: "stripe_customer_id"
+    },
+
+    languageId: {
+      type: DataTypes.BIGINT.UNSIGNED,
+      allowNull: true,
+      field: "language_id"
+    },
+
+    planType: {
+      type: DataTypes.STRING(30),
+      allowNull: true,
+      field: "plan_type"
+    },
   },
   {
     tableName: "subscriptions",

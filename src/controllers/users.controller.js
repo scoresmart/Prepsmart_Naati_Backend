@@ -11,6 +11,7 @@ function safeUser(user) {
     preferredLanguage: user.preferredLanguage,
     naatiCclExamDate: user.naatiCclExamDate,
     accountExpiry: user.accountExpiry ?? null,
+    subscriptionPlan: user.subscriptionPlan ?? null,
     isVerified: user.isVerified,
     createdAt: user.createdAt,
     updatedAt: user.updatedAt,
@@ -87,6 +88,10 @@ export async function updateUser(req, res, next) {
     if (password !== undefined) user.passwordHash = await hashPassword(password);
     if (isVerified !== undefined ) user.isVerified = Boolean(isVerified);
     if (req.body.accountExpiry !== undefined) user.accountExpiry = req.body.accountExpiry || null;
+    if (req.body.subscriptionPlan !== undefined) {
+      const plan = req.body.subscriptionPlan || null;
+      user.subscriptionPlan = plan;
+    }
 
     await user.save();
     return res.json({ success: true, data: { user: safeUser(user) } });

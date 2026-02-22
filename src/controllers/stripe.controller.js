@@ -50,6 +50,8 @@ async function upsertSubscriptionRow(
     cancelAtPeriodEnd,
     currentPeriodEnd,
     stripePriceId,
+    planType,
+    languageId,
   },
   t
 ) {
@@ -67,6 +69,8 @@ async function upsertSubscriptionRow(
     cancelAtPeriodEnd: !!cancelAtPeriodEnd,
     currentPeriodEnd,
   };
+  if (planType !== undefined) data.planType = planType;
+  if (languageId !== undefined) data.languageId = languageId;
 
   if (existing) {
     await existing.update(data, { transaction: t });
@@ -204,7 +208,7 @@ async function handleInvoiceCreateTransaction({ invoiceId, txStatus }) {
 
 export async function createCheckoutSession(req, res) {
   try {
-    const { type, userId, customerId } = req.body;
+    const { type, userId, customerId, languageId } = req.body;
 
     const priceId = priceIdFromType(type);
     if (!priceId) return res.status(400).json({ error: "Invalid type" });
@@ -219,11 +223,13 @@ export async function createCheckoutSession(req, res) {
       metadata: {
         userId: String(userId),
         planType: String(type),
+        ...(languageId ? { languageId: String(languageId) } : {}),
       },
       subscription_data: {
         metadata: {
           userId: String(userId),
           planType: String(type),
+          ...(languageId ? { languageId: String(languageId) } : {}),
         },
       },
       customer: customerId || undefined,
@@ -389,6 +395,9 @@ export async function stripeWebhook(req, res) {
         expand: ["items.data.price", "latest_invoice"],
       });
 
+      const planType = session.metadata?.planType || sub.metadata?.planType || null;
+      const languageId = toInt(session.metadata?.languageId || sub.metadata?.languageId);
+
       await sequelize.transaction(async (t) => {
         const userId = await resolveUserIdFromAny({
           session,
@@ -398,12 +407,9 @@ export async function stripeWebhook(req, res) {
         });
         if (!userId) return;
 
-        if (stripeCustomerId) {
-          await User.update(
-            { stripeCustomerId },
-            { where: { id: userId }, transaction: t }
-          );
-        }
+        const userUpdate = { stripeCustomerId };
+        if (planType) userUpdate.subscriptionPlan = planType;
+        await User.update(userUpdate, { where: { id: userId }, transaction: t });
 
         const currentPeriodEnd = getCurrentPeriodEndFromSub(sub);
         const stripePriceId = getPriceIdFromSub(sub);
@@ -417,6 +423,8 @@ export async function stripeWebhook(req, res) {
             cancelAtPeriodEnd: sub.cancel_at_period_end,
             currentPeriodEnd,
             stripePriceId,
+            planType,
+            languageId,
           },
           t
         );
