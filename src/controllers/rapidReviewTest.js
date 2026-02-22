@@ -17,43 +17,99 @@ const clamp = (num, min, max) => {
 };
 
 const normalizeScores = (raw) => {
-  const accuracy_score = clamp(raw.accuracy_score, 0, 15);
-  const language_quality_score = clamp(raw.language_quality_score, 0, 10);
-  const fluency_pronunciation_score = clamp(
-    raw.fluency_pronunciation_score,
-    0,
-    8
-  );
-  const delivery_coherence_score = clamp(raw.delivery_coherence_score, 0, 5);
-  const cultural_context_score = clamp(raw.cultural_context_score, 0, 4);
-  const response_management_score = clamp(raw.response_management_score, 0, 3);
+  const messageTransfer = clamp(raw.scores?.messageTransfer?.score ?? 0, 0, 28);
+  const languageQuality = clamp(raw.scores?.languageQuality?.score ?? 0, 0, 8);
+  const fluencyDelivery = clamp(raw.scores?.fluencyDelivery?.score ?? 0, 0, 6);
+  const pronunciation = clamp(raw.scores?.pronunciation?.score ?? 0, 0, 3);
 
-  const total_raw_score =
-    accuracy_score +
-    language_quality_score +
-    fluency_pronunciation_score +
-    delivery_coherence_score +
-    cultural_context_score +
-    response_management_score;
+  const rawScore = messageTransfer + languageQuality + fluencyDelivery + pronunciation;
 
-  const final_score = Math.max(5, total_raw_score);
+  // Sum penalty deductions (they come as negative numbers)
+  const pen = raw.penalties || {};
+  const totalPenalties =
+    (pen.indirectSpeech?.deduction || 0) +
+    (pen.startDelay?.deduction || 0) +
+    (pen.longPauses?.deduction || 0) +
+    (pen.excessiveCorrections?.deduction || 0) +
+    (pen.fillerOveruse?.deduction || 0) +
+    (pen.segmentRepeat?.deduction || 0);
 
+  const finalScore = Math.max(0, Math.min(45, rawScore + totalPenalties));
+
+  // Build the full detailed result (stored in aiScores JSON column)
+  const detailed = {
+    scores: {
+      messageTransfer: {
+        score: messageTransfer,
+        maxScore: 28,
+        feedback: raw.scores?.messageTransfer?.feedback ?? "",
+      },
+      languageQuality: {
+        score: languageQuality,
+        maxScore: 8,
+        feedback: raw.scores?.languageQuality?.feedback ?? "",
+      },
+      fluencyDelivery: {
+        score: fluencyDelivery,
+        maxScore: 6,
+        feedback: raw.scores?.fluencyDelivery?.feedback ?? "",
+        azureFluencyUsed: raw.scores?.fluencyDelivery?.azureFluencyUsed ?? false,
+      },
+      pronunciation: {
+        score: pronunciation,
+        maxScore: 3,
+        feedback: raw.scores?.pronunciation?.feedback ?? "",
+        azurePronunciationUsed: raw.scores?.pronunciation?.azurePronunciationUsed ?? false,
+      },
+    },
+    penalties: {
+      indirectSpeech: pen.indirectSpeech || { detected: false, instances: [], deduction: 0 },
+      startDelay: pen.startDelay || { detected: false, delaySeconds: null, deduction: 0 },
+      longPauses: pen.longPauses || { detected: false, count: 0, details: [], deduction: 0 },
+      excessiveCorrections: pen.excessiveCorrections || { detected: false, count: 0, deduction: 0 },
+      fillerOveruse: pen.fillerOveruse || { detected: false, count: 0, fillers: [], deduction: 0 },
+      segmentRepeat: pen.segmentRepeat || { repeatCount: 0, penaltyApplies: false, deduction: 0 },
+    },
+    analysis: {
+      omissions: raw.analysis?.omissions || [],
+      distortions: raw.analysis?.distortions || [],
+      insertions: raw.analysis?.insertions || [],
+      mispronunciations: raw.analysis?.mispronunciations || [],
+      selfCorrections: raw.analysis?.selfCorrections || [],
+    },
+    detailedFeedback: {
+      strengths: raw.detailedFeedback?.strengths || [],
+      improvements: raw.detailedFeedback?.improvements || [],
+      wordsToPractice: raw.detailedFeedback?.wordsToPractice || [],
+      pronunciationTips: raw.detailedFeedback?.pronunciationTips || [],
+    },
+    rawScore,
+    totalPenalties,
+    finalScore,
+    examinerNotes: raw.examinerNotes ?? "",
+  };
+
+  // Backward-compatible flat fields for DB columns
   return {
-    accuracy_score,
-    accuracy_feedback: raw.accuracy_feedback ?? "",
-    language_quality_score,
-    language_quality_feedback: raw.language_quality_feedback ?? "",
-    fluency_pronunciation_score,
-    fluency_pronunciation_feedback: raw.fluency_pronunciation_feedback ?? "",
-    delivery_coherence_score,
-    delivery_coherence_feedback: raw.delivery_coherence_feedback ?? "",
-    cultural_context_score,
-    cultural_context_feedback: raw.cultural_context_feedback ?? "",
-    response_management_score,
-    response_management_feedback: raw.response_management_feedback ?? "",
-    total_raw_score,
-    final_score,
-    one_line_feedback: raw.one_line_feedback ?? "",
+    ...detailed,
+    // Legacy column mappings
+    accuracy_score: messageTransfer,
+    accuracy_feedback: raw.scores?.messageTransfer?.feedback ?? "",
+    language_quality_score: languageQuality,
+    language_quality_feedback: raw.scores?.languageQuality?.feedback ?? "",
+    fluency_pronunciation_score: fluencyDelivery + pronunciation,
+    fluency_pronunciation_feedback:
+      (raw.scores?.fluencyDelivery?.feedback ?? "") +
+      (raw.scores?.pronunciation?.feedback ? " | " + raw.scores.pronunciation.feedback : ""),
+    delivery_coherence_score: 0,
+    delivery_coherence_feedback: "",
+    cultural_context_score: 0,
+    cultural_context_feedback: "",
+    response_management_score: 0,
+    response_management_feedback: "",
+    total_raw_score: rawScore,
+    final_score: finalScore,
+    one_line_feedback: raw.examinerNotes ?? "",
   };
 };
 
@@ -61,34 +117,214 @@ const scoreSchema = {
   type: "object",
   additionalProperties: false,
   required: [
-    "accuracy_score",
-    "accuracy_feedback",
-    "language_quality_score",
-    "language_quality_feedback",
-    "fluency_pronunciation_score",
-    "fluency_pronunciation_feedback",
-    "delivery_coherence_score",
-    "delivery_coherence_feedback",
-    "cultural_context_score",
-    "cultural_context_feedback",
-    "response_management_score",
-    "response_management_feedback",
-    "one_line_feedback",
+    "scores",
+    "penalties",
+    "analysis",
+    "detailedFeedback",
+    "examinerNotes",
   ],
   properties: {
-    accuracy_score: { type: "number" },
-    accuracy_feedback: { type: "string" },
-    language_quality_score: { type: "number" },
-    language_quality_feedback: { type: "string" },
-    fluency_pronunciation_score: { type: "number" },
-    fluency_pronunciation_feedback: { type: "string" },
-    delivery_coherence_score: { type: "number" },
-    delivery_coherence_feedback: { type: "string" },
-    cultural_context_score: { type: "number" },
-    cultural_context_feedback: { type: "string" },
-    response_management_score: { type: "number" },
-    response_management_feedback: { type: "string" },
-    one_line_feedback: { type: "string" },
+    scores: {
+      type: "object",
+      additionalProperties: false,
+      required: ["messageTransfer", "languageQuality", "fluencyDelivery", "pronunciation"],
+      properties: {
+        messageTransfer: {
+          type: "object",
+          additionalProperties: false,
+          required: ["score", "feedback"],
+          properties: {
+            score: { type: "number" },
+            feedback: { type: "string" },
+          },
+        },
+        languageQuality: {
+          type: "object",
+          additionalProperties: false,
+          required: ["score", "feedback"],
+          properties: {
+            score: { type: "number" },
+            feedback: { type: "string" },
+          },
+        },
+        fluencyDelivery: {
+          type: "object",
+          additionalProperties: false,
+          required: ["score", "feedback", "azureFluencyUsed"],
+          properties: {
+            score: { type: "number" },
+            feedback: { type: "string" },
+            azureFluencyUsed: { type: "boolean" },
+          },
+        },
+        pronunciation: {
+          type: "object",
+          additionalProperties: false,
+          required: ["score", "feedback", "azurePronunciationUsed"],
+          properties: {
+            score: { type: "number" },
+            feedback: { type: "string" },
+            azurePronunciationUsed: { type: "boolean" },
+          },
+        },
+      },
+    },
+    penalties: {
+      type: "object",
+      additionalProperties: false,
+      required: [
+        "indirectSpeech",
+        "startDelay",
+        "longPauses",
+        "excessiveCorrections",
+        "fillerOveruse",
+        "segmentRepeat",
+      ],
+      properties: {
+        indirectSpeech: {
+          type: "object",
+          additionalProperties: false,
+          required: ["detected", "instances", "deduction"],
+          properties: {
+            detected: { type: "boolean" },
+            instances: { type: "array", items: { type: "string" } },
+            deduction: { type: "number" },
+          },
+        },
+        startDelay: {
+          type: "object",
+          additionalProperties: false,
+          required: ["detected", "deduction"],
+          properties: {
+            detected: { type: "boolean" },
+            deduction: { type: "number" },
+          },
+        },
+        longPauses: {
+          type: "object",
+          additionalProperties: false,
+          required: ["detected", "count", "deduction"],
+          properties: {
+            detected: { type: "boolean" },
+            count: { type: "number" },
+            deduction: { type: "number" },
+          },
+        },
+        excessiveCorrections: {
+          type: "object",
+          additionalProperties: false,
+          required: ["detected", "count", "deduction"],
+          properties: {
+            detected: { type: "boolean" },
+            count: { type: "number" },
+            deduction: { type: "number" },
+          },
+        },
+        fillerOveruse: {
+          type: "object",
+          additionalProperties: false,
+          required: ["detected", "count", "fillers", "deduction"],
+          properties: {
+            detected: { type: "boolean" },
+            count: { type: "number" },
+            fillers: { type: "array", items: { type: "string" } },
+            deduction: { type: "number" },
+          },
+        },
+        segmentRepeat: {
+          type: "object",
+          additionalProperties: false,
+          required: ["repeatCount", "penaltyApplies", "deduction"],
+          properties: {
+            repeatCount: { type: "number" },
+            penaltyApplies: { type: "boolean" },
+            deduction: { type: "number" },
+          },
+        },
+      },
+    },
+    analysis: {
+      type: "object",
+      additionalProperties: false,
+      required: ["omissions", "distortions", "insertions", "mispronunciations", "selfCorrections"],
+      properties: {
+        omissions: {
+          type: "array",
+          items: {
+            type: "object",
+            additionalProperties: false,
+            required: ["content", "severity", "markImpact"],
+            properties: {
+              content: { type: "string" },
+              severity: { type: "string" },
+              markImpact: { type: "number" },
+            },
+          },
+        },
+        distortions: {
+          type: "array",
+          items: {
+            type: "object",
+            additionalProperties: false,
+            required: ["original", "interpreted", "severity", "markImpact"],
+            properties: {
+              original: { type: "string" },
+              interpreted: { type: "string" },
+              severity: { type: "string" },
+              markImpact: { type: "number" },
+            },
+          },
+        },
+        insertions: {
+          type: "array",
+          items: {
+            type: "object",
+            additionalProperties: false,
+            required: ["content", "markImpact"],
+            properties: {
+              content: { type: "string" },
+              markImpact: { type: "number" },
+            },
+          },
+        },
+        mispronunciations: {
+          type: "array",
+          items: {
+            type: "object",
+            additionalProperties: false,
+            required: ["word", "issue"],
+            properties: {
+              word: { type: "string" },
+              issue: { type: "string" },
+            },
+          },
+        },
+        selfCorrections: {
+          type: "array",
+          items: {
+            type: "object",
+            additionalProperties: false,
+            required: ["phrase", "properlyPrefaced"],
+            properties: {
+              phrase: { type: "string" },
+              properlyPrefaced: { type: "boolean" },
+            },
+          },
+        },
+      },
+    },
+    detailedFeedback: {
+      type: "object",
+      additionalProperties: false,
+      required: ["strengths", "improvements", "wordsToPractice", "pronunciationTips"],
+      properties: {
+        strengths: { type: "array", items: { type: "string" } },
+        improvements: { type: "array", items: { type: "string" } },
+        wordsToPractice: { type: "array", items: { type: "string" } },
+        pronunciationTips: { type: "array", items: { type: "string" } },
+      },
+    },
+    examinerNotes: { type: "string" },
   },
 };
 
@@ -373,7 +609,7 @@ const azurePronunciationAssessmentShort = async ({
   const params = {
     ReferenceText: ref,
     GradingSystem: "HundredMark",
-    Granularity: "Word",
+    Granularity: "Phoneme",
     Dimension: "Comprehensive",
     EnableProsodyAssessment: "True",
     EnableMiscue: "True",
@@ -411,9 +647,54 @@ const azurePronunciationAssessmentShort = async ({
     Insertion: 0,
     Mispronunciation: 0,
   };
+
+  // Extract per-word detail with syllable & phoneme accuracy
+  const words = [];
   for (const ww of wordList) {
     const t = ww?.ErrorType;
     if (typeof t === "string" && t in errorCounts) errorCounts[t] += 1;
+
+    const syllables = Array.isArray(ww?.Syllables)
+      ? ww.Syllables.map((s) => ({
+          syllable: s?.Syllable ?? "",
+          accuracyScore: typeof s?.AccuracyScore === "number" ? s.AccuracyScore : null,
+        }))
+      : [];
+
+    const phonemes = Array.isArray(ww?.Phonemes)
+      ? ww.Phonemes.map((p) => ({
+          phoneme: p?.Phoneme ?? "",
+          accuracyScore: typeof p?.AccuracyScore === "number" ? p.AccuracyScore : null,
+        }))
+      : [];
+
+    words.push({
+      word: ww?.Word ?? "",
+      accuracyScore: typeof ww?.AccuracyScore === "number" ? ww.AccuracyScore : null,
+      errorType: t ?? "None",
+      offset: typeof ww?.Offset === "number" ? ww.Offset : null,
+      duration: typeof ww?.Duration === "number" ? ww.Duration : null,
+      syllables,
+      phonemes,
+    });
+  }
+
+  // Calculate pauses between words (gaps > 2 seconds)
+  const pauses = [];
+  for (let i = 0; i < words.length - 1; i++) {
+    const cur = words[i];
+    const nxt = words[i + 1];
+    if (cur.offset != null && cur.duration != null && nxt.offset != null) {
+      const curEnd = (cur.offset + cur.duration) / 10000000;
+      const nxtStart = nxt.offset / 10000000;
+      const gap = nxtStart - curEnd;
+      if (gap > 2) {
+        pauses.push({
+          afterWord: cur.word,
+          durationSeconds: Math.round(gap * 10) / 10,
+        });
+      }
+    }
   }
 
   return {
@@ -428,6 +709,8 @@ const azurePronunciationAssessmentShort = async ({
       typeof top?.CompletenessScore === "number" ? top.CompletenessScore : null,
     pronScore: typeof top?.PronScore === "number" ? top.PronScore : null,
     errorCounts,
+    words,
+    pauses,
   };
 };
 
@@ -491,51 +774,94 @@ const scoreWithOpenAI = async ({
   language,
   referenceText,
   azureInsights,
+  segmentRepeatCount,
+  dialogueRepeatCount,
 }) => {
   const key = process.env.OPENAI_API_KEY;
   if (!key) throw new Error("OPENAI_API_KEY is required");
 
   const model = process.env.OPENAI_SCORE_MODEL || "gpt-4o-mini";
 
-  const prompt = `
-You are an expert NAATI speaking examiner for PrepSmart.
+  const systemPrompt = `You are an expert NAATI CCL examiner. You assess community language interpreting using NAATI's official deductive marking system. You start with full marks and deduct for errors based on their impact on communication.
 
-Task: Score ONE dialogue attempt (or one segment attempt) out of 45 marks using six parameters.
-Each parameter MUST be scored independently within its exact range and include a short feedback note.
+CRITICAL NAATI RULES YOU MUST ENFORCE:
+1. INDIRECT SPEECH IS NOT ACCEPTABLE - Direct/first-person speech is required. If the student uses third-person ("he said", "she mentioned", "the doctor said"), deduct marks.
+2. One segment repeat per dialogue is free; additional repeats cost 1 mark each.
+3. Self-corrections are allowed if prefaced properly (e.g., "Sorry, I'll say that again"). Excessive self-corrections (>2 in a segment) cost 1 mark.
+4. Long pauses (>5 seconds) result in mark deductions.
+5. Filler overuse (>3 fillers like "um", "uh", "ah", "er") costs 1 mark.
 
-Inputs:
-- REFERENCE: what the audio said (ground truth ASR for the source dialogue)
-- SUGGESTED: an ideal version (if present)
-- STUDENT: what the student said (student ASR)
+YOUR SCORING PHILOSOPHY:
+- Primary focus: MESSAGE TRANSFER (Did they convey the meaning accurately?)
+- Secondary: Language quality, fluency, delivery
+- Be fair but strict - match real NAATI standards
+- 2-3 major errors per dialogue typically results in failure`;
 
-Language (optional): ${language || "unspecified"}.
+  const userPrompt = `## SOURCE (What was said - to be interpreted):
+"${referenceText || "Not provided. Use REFERENCE transcript below."}"
 
-REFERENCE SCRIPT (optional):
-${referenceText || "Not provided. Use ASR transcripts as reference."}
+## AZURE SPEECH ANALYSIS:
+${azureInsights ? JSON.stringify(azureInsights) : "Not available for this language"}
 
-AZURE ASR / PRONUNCIATION / SENTIMENT INSIGHTS (optional JSON):
-${azureInsights ? JSON.stringify(azureInsights) : "Not provided."}
-
-FULL TRANSCRIPT:
+## FULL TRANSCRIPT:
 ${combinedTranscript}
 
-Scoring (TOTAL = 45):
-1) Accuracy & Meaning Transfer (0–15): meaning, tone, intent, omissions/distortions
-2) Language Quality (0–10): grammar, vocab, register/formality
-3) Fluency & Pronunciation (0–8): smoothness, clarity, pacing, pauses/fillers (use Azure pronunciation/confidence if provided)
-4) Delivery & Coherence (0–5): flow, confidence, organization
-5) Cultural & Contextual Appropriateness (0–4): idioms, cultural meaning, respectful address
-6) Response Management (0–3): turn-taking, timing, completion
+## REPEAT INFO:
+- Segment repeat count: ${segmentRepeatCount ?? 0} ${(segmentRepeatCount ?? 0) > 0 ? "⚠️ PENALTY APPLIES if dialogue total > 1" : ""}
+- Total dialogue repeats used: ${dialogueRepeatCount ?? 0}/1 free
 
-Rules:
-- Use the provided reference script if available; otherwise use REFERENCE ASR as the reference.
-- Score each category strictly within its range.
-- Provide concise, actionable feedback for each category.
-- Do NOT include any extra keys, totals, or explanations outside the required JSON schema.
-- The backend applies a NAATI grace fallback where the final total cannot be less than 5.
+---
 
-Return only JSON that matches the schema.
-`;
+## SCORING TASK
+
+Score this segment out of 45 marks using NAATI's deductive system.
+
+### SCORING BREAKDOWN (45 marks total):
+
+**1. MESSAGE TRANSFER & ACCURACY (0-28 marks)** - PRIMARY CRITERION
+- Completeness: Was ALL information conveyed?
+- Accuracy: Is the meaning correct and undistorted?
+- Omissions: List any missing information (minor = -1 to -2, major = -3 to -5 each)
+- Distortions: List any meaning changes (minor = -1 to -2, major = -3 to -5 each)
+- Insertions: List any added information not in source (-1 to -2 each)
+- Numbers/Names/Dates: Must be exactly correct (-2 each if wrong)
+
+**2. LANGUAGE QUALITY (0-8 marks)**
+- Grammar correctness in target language
+- Vocabulary appropriateness and precision
+- Register/formality matching
+- Natural expression (idiomatic, not literal word-for-word)
+
+**3. FLUENCY & DELIVERY (0-6 marks)**
+Use Azure data if available:
+- Azure Fluency Score > 80 → 5-6 marks
+- Azure Fluency Score 60-80 → 3-4 marks
+- Azure Fluency Score < 60 → 1-2 marks
+Also consider: Speaking pace, hesitations, fillers, flow, confidence
+
+**4. PRONUNCIATION (0-3 marks)** - For English segments with Azure phoneme data
+- Azure Accuracy Score > 85 → 3 marks
+- Azure Accuracy Score 70-85 → 2 marks
+- Azure Accuracy Score < 70 → 1 mark
+- If no Azure data: score based on transcript clarity
+
+### PENALTY DEDUCTIONS (Apply after base scoring):
+| Issue | Deduction |
+|-------|-----------|
+| Indirect speech (single instance) | -2 |
+| Indirect speech (multiple/entire) | -5 to -10 + FLAG |
+| Long pause mid-interpretation (>5 sec) | -1 per occurrence |
+| Segment repeat beyond free allowance | -1 |
+| Excessive self-corrections (>2) | -1 |
+| Filler overuse (>3) | -1 |
+
+### DETECTION REQUIREMENTS
+1. **Mispronounced Words**: List words with Azure accuracyScore < 80
+2. **Fillers**: Detect "um", "uh", "ah", "er", "hmm", "like", "you know"
+3. **Self-Corrections**: Detect "sorry", "I mean", "let me repeat", "correction"
+4. **Indirect Speech**: Detect "he said", "she mentioned", "they told", "the doctor said"
+
+Return ONLY valid JSON matching the required schema.`;
 
   const res = await fetch("https://api.openai.com/v1/responses", {
     method: "POST",
@@ -546,14 +872,11 @@ Return only JSON that matches the schema.
     body: JSON.stringify({
       model,
       input: [
-        {
-          role: "system",
-          content: "You are an expert NAATI speaking examiner.",
-        },
-        { role: "user", content: prompt },
+        { role: "system", content: systemPrompt },
+        { role: "user", content: userPrompt },
       ],
-      temperature: 0.25,
-      max_output_tokens: 900,
+      temperature: 0.2,
+      max_output_tokens: 1500,
       text: {
         format: {
           type: "json_schema",
@@ -752,17 +1075,21 @@ export const runAiRapidReview = async (req, res, next) => {
       studentSentiment: sentiment || null,
     };
     console.log(azureInsights);
+
+    const prevMax = await RapidReviewAttempt.max("repeatCount", {
+      where: { userId: authUserId, rapidReviewId, segmentId },
+    });
+    const repeatCount = Number(prevMax || 0) + 1;
+
     const scores = await scoreWithOpenAI({
       combinedTranscript,
       language,
       referenceText: segment.textContent || null,
       azureInsights,
+      segmentRepeatCount: repeatCount - 1,
+      dialogueRepeatCount: 0,
     });
     console.log(scores);
-    const prevMax = await RapidReviewAttempt.max("repeatCount", {
-      where: { userId: authUserId, rapidReviewId, segmentId },
-    });
-    const repeatCount = Number(prevMax || 0) + 1;
 
     const rapidReviewAttempt = await RapidReviewAttempt.create({
       rapidReviewId,
@@ -784,9 +1111,9 @@ export const runAiRapidReview = async (req, res, next) => {
       culturalControlText: scores.cultural_context_feedback,
       responseManagementScore: scores.response_management_score,
       responseManagementText: scores.response_management_feedback,
-      totalRawScore: scores.total_raw_score,
-      finalScore: scores.final_score,
-      oneLineFeedback: scores.one_line_feedback,
+      totalRawScore: scores.total_raw_score ?? scores.rawScore,
+      finalScore: scores.final_score ?? scores.finalScore,
+      oneLineFeedback: scores.one_line_feedback ?? scores.examinerNotes,
       language: language,
       repeatCount,
     });
