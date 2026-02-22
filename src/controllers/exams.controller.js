@@ -231,27 +231,33 @@ export const computeResult = async (req, res, next) => {
       });
     }
 
-    let notes = buildFeedbackNotes(segments);
-    const MAX_CHARS = 12000;
-    if (notes.length > MAX_CHARS)
-      notes = notes.slice(0, MAX_CHARS) + "\n...(truncated)";
+    let overallFeedback = null;
+    try {
+      let notes = buildFeedbackNotes(segments);
+      const MAX_CHARS = 12000;
+      if (notes.length > MAX_CHARS)
+        notes = notes.slice(0, MAX_CHARS) + "\n...(truncated)";
 
-    const prompt = [
-      `Averages (0–?? scale depending on your rubric): ${JSON.stringify(
-        averages
-      )}`,
-      `Per-segment feedback notes:`,
-      notes,
-    ].join("\n\n");
+      const prompt = [
+        `Averages (0–?? scale depending on your rubric): ${JSON.stringify(
+          averages
+        )}`,
+        `Per-segment feedback notes:`,
+        notes,
+      ].join("\n\n");
 
-    const ai = await openai.responses.create({
-      model: "gpt-5.2",
-      instructions:
-        "You are an English speaking exam evaluator. Read the per-segment feedback notes and averages, then write overall feedback in 5 to 7 short lines. Mention patterns across segments, 2 strengths, 2 improvement areas, and 1 specific actionable next step. Do not repeat the notes verbatim. No headings.",
-      input: prompt,
-    });
+      const feedbackModel = process.env.OPENAI_SCORE_MODEL || "gpt-4o-mini";
+      const ai = await openai.responses.create({
+        model: feedbackModel,
+        instructions:
+          "You are an English speaking exam evaluator. Read the per-segment feedback notes and averages, then write overall feedback in 5 to 7 short lines. Mention patterns across segments, 2 strengths, 2 improvement areas, and 1 specific actionable next step. Do not repeat the notes verbatim. No headings.",
+        input: prompt,
+      });
 
-    const overallFeedback = (ai.output_text || "").trim() || null;
+      overallFeedback = (ai.output_text || "").trim() || null;
+    } catch (feedbackErr) {
+      console.error("Failed to generate overall feedback:", feedbackErr.message);
+    }
 
     const updated = await attempt.update({
       accuracyScore: averages.accuracyScore,
