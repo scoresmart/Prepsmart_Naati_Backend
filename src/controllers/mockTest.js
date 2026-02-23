@@ -983,6 +983,9 @@ export const runAiExam = async (req, res, next) => {
     const audioTranscript = req.body.audioTranscript
       ? String(req.body.audioTranscript)
       : null;
+    const translationText = req.body.translationText
+      ? String(req.body.translationText).trim()
+      : null;
     const authUserId = req.body.userId;
     if (!authUserId)
       return res.status(401).json({ success: false, message: "Unauthorized" });
@@ -1090,7 +1093,11 @@ export const runAiExam = async (req, res, next) => {
       }
     }
 
-    if (suggestedAudioUrl) {
+    if (translationText) {
+      // Frontend sent the correct translation text — skip Azure STT for suggested audio
+      suggestedTranscript = translationText;
+      console.log("✅ Using frontend-provided translationText as suggestedTranscript");
+    } else if (suggestedAudioUrl) {
       try {
         azureSug = await transcribeWithAzure({
           audioUrl: suggestedAudioUrl,

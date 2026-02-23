@@ -73,19 +73,37 @@ export async function translateSegment(req, res, next) {
     }
     if (!inputText) return res.status(400).json({ success: false, message: "text or segmentId is required" });
 
-    // Resolve target language — from param, or from dialogueId → Language.langCode
-    let target = toLangCode(targetLanguage);
-    if (!target && dialogueId) {
+    // Resolve LOTE language — from param, or from dialogueId → Language.langCode
+    let loteCode = toLangCode(targetLanguage);
+    if (!loteCode && dialogueId) {
       const dlg = await models.Dialogue.findByPk(dialogueId, {
         include: [{ model: models.Language, as: "Language" }],
       });
-      if (dlg?.Language) target = toLangCode(dlg.Language.langCode) || toLangCode(dlg.Language.name);
+      if (dlg?.Language) loteCode = toLangCode(dlg.Language.langCode) || toLangCode(dlg.Language.name);
     }
-    if (!target) return res.status(400).json({ success: false, message: "Could not determine target language" });
+    if (!loteCode) return res.status(400).json({ success: false, message: "Could not determine target language" });
 
     const source = toLangCode(sourceLanguage) || null; // auto-detect if not provided
 
-    const result = await googleTranslate(inputText, target, source);
+    // Bidirectional: first translate to LOTE, then check if source was already LOTE
+    const result = await googleTranslate(inputText, loteCode, source);
+    const detectedBase = (result.detectedSource || "").toLowerCase().split("-")[0];
+    const loteBase = loteCode.toLowerCase().split("-")[0];
+
+    // If the detected source language matches the LOTE target, the text is already
+    // in LOTE — translate to English instead
+    if (detectedBase === loteBase) {
+      const enResult = await googleTranslate(inputText, "en", loteCode);
+      return res.json({
+        success: true,
+        data: {
+          originalText: inputText,
+          translatedText: enResult.translatedText,
+          sourceLang: loteCode,
+          targetLang: "en",
+        },
+      });
+    }
 
     return res.json({
       success: true,
@@ -93,7 +111,7 @@ export async function translateSegment(req, res, next) {
         originalText: inputText,
         translatedText: result.translatedText,
         sourceLang: result.detectedSource,
-        targetLang: target,
+        targetLang: loteCode,
       },
     });
   } catch (e) {
@@ -110,6 +128,7 @@ export async function createSegment(req, res, next) {
       audioUrl,
       suggestedAudioUrl,
       segmentOrder,
+      translation,
     } = req.body;
 
     const dialogueIdNum = toInt(dialogueId);
@@ -159,6 +178,7 @@ export async function createSegment(req, res, next) {
       audioUrl: finalAudioUrl,
       suggestedAudioUrl: finalSuggestedAudioUrl,
       segmentOrder: segmentOrderNum,
+      translation: translation || null,
     });
 
     return res.status(201).json({ success: true, data: { segment } });
@@ -201,12 +221,13 @@ export async function updateSegment(req, res, next) {
     if (!segment)
       return res.status(404).json({ success: false, message: "Not found" });
 
-    const { textContent, audioUrl, suggestedAudioUrl, segmentOrder } = req.body;
+    const { textContent, audioUrl, suggestedAudioUrl, segmentOrder, translation } = req.body;
 
     const audioFile = req.files?.audio?.[0];
     const suggestedFile = req.files?.suggestedAudio?.[0];
 
     if (textContent !== undefined) segment.textContent = textContent;
+    if (translation !== undefined) segment.translation = translation || null;
 
     const segmentOrderNum = toInt(segmentOrder);
     if (segmentOrder !== undefined) {

@@ -909,6 +909,9 @@ export const runAiRapidReview = async (req, res, next) => {
 
     const rapidReviewId = toInt(req.body.rapidReviewId);
     const language = req.body.language ? String(req.body.language) : null;
+    const translationText = req.body.translationText
+      ? String(req.body.translationText).trim()
+      : null;
     const authUserId = toInt(req.body.userId);
 
     if (!authUserId)
@@ -1018,7 +1021,10 @@ export const runAiRapidReview = async (req, res, next) => {
       }
     }
 
-    if (suggestedAudioUrl) {
+    if (translationText) {
+      suggestedTranscript = translationText;
+      console.log("✅ Using frontend-provided translationText as suggestedTranscript (rapid review)");
+    } else if (suggestedAudioUrl) {
       try {
         azureSug = await transcribeWithAzure({
           audioUrl: suggestedAudioUrl,

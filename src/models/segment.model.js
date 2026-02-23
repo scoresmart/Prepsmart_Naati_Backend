@@ -9,6 +9,7 @@ export const Segment = sequelize.define(
     textContent: { type: DataTypes.TEXT, allowNull: false },
     audioUrl: { type: DataTypes.STRING(600), allowNull: true },
     suggestedAudioUrl: { type: DataTypes.STRING(600), allowNull: true },
+    translation: { type: DataTypes.TEXT, allowNull: true },
     segmentOrder: { type: DataTypes.INTEGER.UNSIGNED, allowNull: false }
   },
   {
