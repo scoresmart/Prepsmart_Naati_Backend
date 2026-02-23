@@ -22,12 +22,14 @@ const normalizeScores = (raw) => {
   let fluencyDelivery = clamp(raw.scores?.fluencyDelivery?.score ?? 0, 0, 6);
   let pronunciation = clamp(raw.scores?.pronunciation?.score ?? 0, 0, 3);
 
-  // Minimum floor: if GPT returned 0 across ALL categories, the student still spoke
-  // something — give minimum credit for fluency and pronunciation.
-  if (messageTransfer === 0 && languageQuality === 0 && fluencyDelivery === 0 && pronunciation === 0) {
-    fluencyDelivery = 2;
-    pronunciation = 1;
-    languageQuality = 1;
+  // Minimum floor: if GPT returned 0 for message transfer but the student
+  // clearly spoke something, guarantee minimums for the other categories.
+  if (messageTransfer === 0) {
+    if (fluencyDelivery < 2) fluencyDelivery = 2;
+    if (pronunciation < 1) pronunciation = 1;
+    if (languageQuality < 2) languageQuality = 2;
+    // Student spoke on-topic → give partial message credit
+    messageTransfer = 5;
   }
 
   const rawScore = messageTransfer + languageQuality + fluencyDelivery + pronunciation;
@@ -1014,31 +1016,38 @@ const scoreWithOpenAI = async ({
 
   const model = process.env.OPENAI_SCORE_MODEL || "gpt-4o-mini";
 
-  const systemPrompt = `You are an expert NAATI CCL examiner. You assess community language interpreting using NAATI's official deductive marking system. You start with full marks and deduct for errors based on their impact on communication.
+  const systemPrompt = `You are an expert NAATI CCL examiner. You assess community language interpreting using NAATI's official deductive marking system.
 
-CRITICAL NAATI RULES YOU MUST ENFORCE:
-1. INDIRECT SPEECH IS NOT ACCEPTABLE - Direct/first-person speech is required. If the student uses third-person ("he said", "she mentioned", "the doctor said"), deduct marks.
+CRITICAL — MACHINE BACK-TRANSLATION WARNING:
+The student's LOTE (Language Other Than English) response has been machine-translated back to English using Google Translate. This back-translation is UNRELIABLE and may:
+- Produce vulgar, offensive, or nonsensical English words that the student NEVER said
+- Completely distort the meaning of what the student actually said
+- Miss nuance, idioms, and colloquial expressions
+- Truncate or garble portions of the text
+
+Therefore, you MUST:
+1. Extract KEY CONCEPTS from the suggested/reference translation (e.g., "bank account", "transactions", "worried", "debit card", "compromised")
+2. Check if the student's back-translation contains ANY of these key concepts, even in distorted form
+3. Give PARTIAL CREDIT generously — if the student captured 30-50% of key concepts, award at LEAST 10-15/28 for message transfer
+4. Give credit for RELATED concepts (e.g., "card details" matches "debit card details"; "worried" matches "concerned")
+5. 0/28 for message transfer should ONLY be given if the student said something COMPLETELY unrelated to the topic (e.g., talking about weather when the topic is banking)
+6. If the student mentioned the general TOPIC (e.g., card/bank/money), they deserve at least 8-12/28
+
+NAATI RULES:
+1. INDIRECT SPEECH IS NOT ACCEPTABLE - Direct/first-person speech is required. Third-person = deduct marks.
 2. One segment repeat per dialogue is free; additional repeats cost 1 mark each.
-3. Self-corrections are allowed if prefaced properly (e.g., "Sorry, I'll say that again"). Excessive self-corrections (>2 in a segment) cost 1 mark.
-4. Long pauses (>5 seconds) result in mark deductions.
-5. Filler overuse (>3 fillers like "um", "uh", "ah", "er") costs 1 mark.
+3. Excessive self-corrections (>2) cost 1 mark.
+4. Long pauses (>5 seconds) = mark deductions.
+5. Filler overuse (>3) costs 1 mark.
 
-YOUR SCORING PHILOSOPHY:
-- Primary focus: MESSAGE TRANSFER (Did they convey the meaning accurately?)
-- Secondary: Language quality, fluency, delivery
-- Be fair but strict - match real NAATI standards
-- 2-3 major errors per dialogue typically results in failure
-
-CRITICAL — SCORE EACH CATEGORY INDEPENDENTLY:
-- Even if message transfer is poor, the student may still speak fluently and clearly.
-- Language Quality, Fluency, and Pronunciation MUST be scored on their own merits.
-- A student who speaks fluently with good pronunciation but gets the wrong meaning should still score well on fluency/pronunciation.
-- NEVER give 0 across all categories. If the student spoke at all, fluency and pronunciation should be > 0.
-
-IMPORTANT — BACK-TRANSLATED TEXT NOTE:
-- The STUDENT transcript has been machine-translated back to English for comparison.
-- Machine translation may distort meaning — focus on whether the core message concepts match, not exact wording.
-- If the back-translation seems odd but contains key concepts from the reference, give appropriate credit.`;
+SCORING PHILOSOPHY:
+- Be FAIR and GENEROUS with partial credit — this is practice, not a pass/fail exam
+- If the student spoke fluently in the correct language, Fluency should be 4-6/6
+- If the student spoke clearly, Pronunciation should be 2-3/3
+- Language Quality should be 4-8/8 if they used correct grammar in the target language
+- SCORE EACH CATEGORY INDEPENDENTLY — poor message transfer does NOT reduce fluency/pronunciation
+- A student who speaks fluently with good pronunciation but wrong meaning: high fluency + high pronunciation + low message transfer
+- If no Azure speech data is available, give at LEAST 3/6 fluency and 2/3 pronunciation for any student who spoke clearly`;
 
   const userPrompt = `## SOURCE (What was said - to be interpreted):
 "${referenceText || "Not provided. Use REFERENCE transcript below."}"
@@ -1062,31 +1071,31 @@ Score this segment out of 45 marks using NAATI's deductive system.
 ### SCORING BREAKDOWN (45 marks total):
 
 **1. MESSAGE TRANSFER & ACCURACY (0-28 marks)** - PRIMARY CRITERION
-- Completeness: Was ALL information conveyed?
-- Accuracy: Is the meaning correct and undistorted?
-- Omissions: List any missing information (minor = -1 to -2, major = -3 to -5 each)
-- Distortions: List any meaning changes (minor = -1 to -2, major = -3 to -5 each)
-- Insertions: List any added information not in source (-1 to -2 each)
-- Numbers/Names/Dates: Must be exactly correct (-2 each if wrong)
+STEP 1: Extract key concepts from the SUGGESTED translation (e.g., for "I noticed two transactions on my bank account that I did not make, and I'm worried my debit card details have been compromised" → key concepts: [transactions, bank account, did not make, worried, debit card, details, compromised])
+STEP 2: Check how many key concepts appear in the STUDENT's back-translation, even in different wording
+STEP 3: Score based on concept coverage:
+  - 80-100% concepts matched → 22-28 marks
+  - 60-80% concepts matched → 16-22 marks
+  - 40-60% concepts matched → 10-16 marks
+  - 20-40% concepts matched → 5-10 marks
+  - Related topic but few concepts → 3-5 marks
+  - Completely unrelated topic → 0-3 marks
+REMEMBER: Back-translation is unreliable. If the student's text mentions the same TOPIC (banking, medical, legal, etc.), it likely captured more meaning than the translation shows.
 
 **2. LANGUAGE QUALITY (0-8 marks)**
-- Grammar correctness in target language
-- Vocabulary appropriateness and precision
-- Register/formality matching
-- Natural expression (idiomatic, not literal word-for-word)
+- If student spoke in the correct target language → minimum 3/8
+- Grammar correctness, vocabulary, register, natural expression
+- Score this based on the ORIGINAL transcript, not the back-translation
 
 **3. FLUENCY & DELIVERY (0-6 marks)**
-Use Azure data if available:
-- Azure Fluency Score > 80 → 5-6 marks
-- Azure Fluency Score 60-80 → 3-4 marks
-- Azure Fluency Score < 60 → 1-2 marks
-Also consider: Speaking pace, hesitations, fillers, flow, confidence
+- If student spoke without major hesitation → minimum 3/6
+- If Azure data available: Fluency > 80 → 5-6, 60-80 → 3-4, < 60 → 1-2
+- If no Azure data: assume at least 3/6 for a student who completed the segment
 
-**4. PRONUNCIATION (0-3 marks)** - For English segments with Azure phoneme data
-- Azure Accuracy Score > 85 → 3 marks
-- Azure Accuracy Score 70-85 → 2 marks
-- Azure Accuracy Score < 70 → 1 mark
-- If no Azure data: score based on transcript clarity
+**4. PRONUNCIATION (0-3 marks)**
+- If student spoke clearly enough to be transcribed → minimum 2/3
+- If Azure data: Accuracy > 85 → 3, 70-85 → 2, < 70 → 1
+- If no Azure data: give 2/3 as default for clear speech
 
 ### PENALTY DEDUCTIONS (Apply after base scoring):
 | Issue | Deduction |
