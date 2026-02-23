@@ -1013,13 +1013,17 @@ const googleSTT = async ({ buffer, audioUrl, mimetype, language }) => {
       }
     }
 
-    console.log(`[google-stt] Transcribing (${locale}, ${encoding}, ${audioBuffer.length} bytes)`);
+    // Build alternative language codes — always include English for code-switching
+    const altLangs = [];
+    if (!locale.startsWith("en")) altLangs.push("en-AU", "en-US");
+    console.log(`[google-stt] Transcribing (${locale}, alts: [${altLangs}], ${encoding}, ${audioBuffer.length} bytes)`);
 
     const body = {
       config: {
         encoding,
         sampleRateHertz,
         languageCode: locale,
+        ...(altLangs.length ? { alternativeLanguageCodes: altLangs } : {}),
         enableAutomaticPunctuation: true,
       },
       audio: { content: audioContent },
@@ -1094,7 +1098,15 @@ SCORING PHILOSOPHY:
 - Language Quality should be 4-8/8 if they used correct grammar in the target language
 - SCORE EACH CATEGORY INDEPENDENTLY — poor message transfer does NOT reduce fluency/pronunciation
 - A student who speaks fluently with good pronunciation but wrong meaning: high fluency + high pronunciation + low message transfer
-- If no Azure speech data is available, give at LEAST 3/6 fluency and 2/3 pronunciation for any student who spoke clearly`;
+- If no Azure speech data is available, give at LEAST 3/6 fluency and 2/3 pronunciation for any student who spoke clearly
+
+CODE-SWITCHING & PARTIAL CREDIT:
+- Students commonly MIX English and LOTE in the same sentence (e.g., saying "Good morning" in English then continuing in Punjabi). This is NORMAL in CCL interpreting and should NOT be penalized.
+- Even a GREETING like "Good morning" or "Hello" that matches the source segment deserves partial message transfer credit (at least 2-3 marks).
+- Any KEYWORD or PHRASE that matches the source content, even partially, deserves marks.
+- HOWEVER: Grammar mistakes, wrong tense, or awkward phrasing in the target language should reduce LANGUAGE QUALITY marks (not message transfer).
+  Example: If student says the right meaning but with wrong verb tense → Message Transfer stays high (20-25/28), Language Quality drops (3-5/8).
+- Deduct Language Quality for: wrong tenses, subject-verb disagreement, incorrect word order, literal word-for-word translation, mixing registers improperly.`;
 
   const userPrompt = `## SOURCE (What was said - to be interpreted):
 "${referenceText || "Not provided. Use REFERENCE transcript below."}"
@@ -1133,6 +1145,10 @@ REMEMBER: Back-translation is unreliable. If the student's text mentions the sam
 - If student spoke in the correct target language → minimum 3/8
 - Grammar correctness, vocabulary, register, natural expression
 - Score this based on the ORIGINAL transcript, not the back-translation
+- DEDUCT marks for: wrong verb tenses, subject-verb disagreement, incorrect word order, unnatural phrasing, literal word-for-word translation
+- If grammar and tenses are mostly correct → 6-8/8
+- If grammar has some errors but is understandable → 4-6/8
+- If grammar has significant errors → 2-4/8
 
 **3. FLUENCY & DELIVERY (0-6 marks)**
 - If student spoke without major hesitation → minimum 3/6
