@@ -18,10 +18,18 @@ const clamp = (num, min, max) => {
 };
 
 const normalizeScores = (raw) => {
-  const messageTransfer = clamp(raw.scores?.messageTransfer?.score ?? 0, 0, 28);
-  const languageQuality = clamp(raw.scores?.languageQuality?.score ?? 0, 0, 8);
-  const fluencyDelivery = clamp(raw.scores?.fluencyDelivery?.score ?? 0, 0, 6);
-  const pronunciation = clamp(raw.scores?.pronunciation?.score ?? 0, 0, 3);
+  let messageTransfer = clamp(raw.scores?.messageTransfer?.score ?? 0, 0, 28);
+  let languageQuality = clamp(raw.scores?.languageQuality?.score ?? 0, 0, 8);
+  let fluencyDelivery = clamp(raw.scores?.fluencyDelivery?.score ?? 0, 0, 6);
+  let pronunciation = clamp(raw.scores?.pronunciation?.score ?? 0, 0, 3);
+
+  // Minimum floor: if GPT returned 0 across ALL categories, the student still spoke
+  // something — give minimum credit for fluency and pronunciation.
+  if (messageTransfer === 0 && languageQuality === 0 && fluencyDelivery === 0 && pronunciation === 0) {
+    fluencyDelivery = 2;
+    pronunciation = 1;
+    languageQuality = 1;
+  }
 
   const rawScore = messageTransfer + languageQuality + fluencyDelivery + pronunciation;
 
@@ -462,7 +470,11 @@ const toAzureLocales = (lang) => {
     te: ["te-IN"],
     ml: ["ml-IN"],
   };
-  return (map[s.toLowerCase()] || []).map(normalizeLocale).filter(Boolean);
+  // Filter out locales Azure STT does not yet support (will use Whisper fallback)
+  const unsupported = new Set(["pa-IN"]);
+  return (map[s.toLowerCase()] || [])
+    .map(normalizeLocale)
+    .filter((l) => l && !unsupported.has(l));
 };
 
 const LANGUAGE_NAME_TO_CODE = {
@@ -520,6 +532,19 @@ const LANGUAGE_NAME_TO_CODE = {
   burmese: "my",
   lao: "lo",
   swahili: "sw",
+};
+
+// Reverse map: code → display name (for GPT prompt)
+const CODE_TO_LANGUAGE_NAME = Object.fromEntries(
+  Object.entries(LANGUAGE_NAME_TO_CODE).map(([name, code]) => [
+    code,
+    name.charAt(0).toUpperCase() + name.slice(1),
+  ])
+);
+
+const toLanguageName = (code) => {
+  const c = String(code || "").toLowerCase().split("-")[0];
+  return CODE_TO_LANGUAGE_NAME[c] || code || "LOTE";
 };
 
 const toLanguageCode = (language) => {
@@ -839,6 +864,190 @@ const transcribeWithAzure = async ({
   return azureFastTranscribe({ buffer, mimetype, audioUrl, language, locales });
 };
 
+/* ─── Whisper fallback for languages Azure STT does not support ─── */
+const WHISPER_SUPPORTED_LANGS = new Set([
+  "af","ar","hy","az","be","bs","bg","ca","zh","hr","cs","da","nl","en",
+  "et","fi","fr","gl","de","el","he","hi","hu","is","id","it","ja","kn",
+  "kk","ko","lv","lt","mk","ms","mr","mi","ne","no","fa","pl","pt","ro",
+  "ru","sr","sk","sl","es","sw","sv","tl","ta","th","tr","uk","ur","vi","cy",
+  "gu","bn","te","ml",
+]);
+
+// Languages where Whisper may output in a different script (e.g. Devanagari for Punjabi)
+// Map: target langCode → script regex that is WRONG + correct Google Translate target
+const SCRIPT_FIX_MAP = {
+  pa: { wrong: /[\u0900-\u097F]/, label: "Devanagari→Gurmukhi" }, // Whisper outputs Hindi script for Punjabi
+};
+
+const whisperTranscribe = async ({ buffer, audioUrl, language }) => {
+  const key = process.env.OPENAI_API_KEY;
+  if (!key) {
+    console.error("[whisper] No OPENAI_API_KEY, cannot transcribe");
+    return { text: "", insights: null };
+  }
+
+  let audioBuffer = buffer;
+  let filename = "audio.wav";
+
+  if (!audioBuffer && audioUrl) {
+    const resp = await fetch(audioUrl);
+    if (!resp.ok) {
+      console.error("[whisper] Failed to fetch audio:", resp.status);
+      return { text: "", insights: null };
+    }
+    audioBuffer = Buffer.from(await resp.arrayBuffer());
+    const ext = audioUrl.split("?")[0].split(".").pop() || "wav";
+    filename = `audio.${ext}`;
+  }
+
+  if (!audioBuffer || audioBuffer.length === 0) return { text: "", insights: null };
+
+  // Only pass language if Whisper supports it; otherwise auto-detect
+  const whisperLang = language && WHISPER_SUPPORTED_LANGS.has(language) ? language : null;
+  console.log("[whisper] Transcribing lang:", language, whisperLang ? "(supported)" : "(auto-detect)", "size:", audioBuffer.length);
+
+  const form = new FormData();
+  form.append("file", new Blob([audioBuffer], { type: "audio/wav" }), filename);
+  form.append("model", "whisper-1");
+  if (whisperLang) form.append("language", whisperLang);
+
+  const res = await fetch("https://api.openai.com/v1/audio/transcriptions", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${key}` },
+    body: form,
+  });
+
+  if (!res.ok) {
+    const errText = await res.text();
+    console.error("[whisper] API error:", errText?.substring(0, 200));
+    // If it failed with a language param, retry without it
+    if (whisperLang) {
+      console.log("[whisper] Retrying without language param (auto-detect)...");
+      const form2 = new FormData();
+      form2.append("file", new Blob([audioBuffer], { type: "audio/wav" }), filename);
+      form2.append("model", "whisper-1");
+      const res2 = await fetch("https://api.openai.com/v1/audio/transcriptions", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${key}` },
+        body: form2,
+      });
+      if (res2.ok) {
+        const json2 = await res2.json();
+        console.log("[whisper] Auto-detect result:", json2.text?.substring(0, 100));
+        return { text: json2.text || "", insights: null };
+      }
+    }
+    return { text: "", insights: null };
+  }
+
+  const json = await res.json();
+  console.log("[whisper] Result:", json.text?.substring(0, 100));
+  return { text: json.text || "", insights: null };
+};
+
+/* ─── Google Translate helper (for auto-generating suggested translations) ─── */
+const googleTranslate = async (text, targetLang, sourceLang = null) => {
+  const apiKey = process.env.GOOGLE_TRANSLATE_API_KEY;
+  if (!apiKey || !text) return null;
+  try {
+    const body = { q: text, target: targetLang, format: "text" };
+    if (sourceLang) body.source = sourceLang;
+    const res = await fetch(
+      `https://translation.googleapis.com/language/translate/v2?key=${encodeURIComponent(apiKey)}`,
+      { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }
+    );
+    if (!res.ok) return null;
+    const json = await res.json();
+    return json?.data?.translations?.[0]?.translatedText || null;
+  } catch (e) {
+    console.error("[scoring] Google Translate error:", e.message?.substring(0, 100));
+    return null;
+  }
+};
+
+/* ─── Google Cloud Speech-to-Text (native support for Punjabi and other languages) ─── */
+const GOOGLE_STT_LOCALE_MAP = {
+  pa: "pa-Guru-IN",  // Punjabi (Gurmukhi)
+};
+
+const googleSTT = async ({ buffer, audioUrl, mimetype, language }) => {
+  const apiKey = process.env.GOOGLE_TRANSLATE_API_KEY;
+  const locale = GOOGLE_STT_LOCALE_MAP[language];
+  if (!apiKey || !locale) return null;
+
+  try {
+    let audioBuffer = buffer;
+    if (!audioBuffer && audioUrl) {
+      const resp = await fetch(audioUrl);
+      if (!resp.ok) { console.error("[google-stt] fetch audio failed:", resp.status); return null; }
+      audioBuffer = Buffer.from(await resp.arrayBuffer());
+    }
+    if (!audioBuffer || audioBuffer.length === 0) return null;
+
+    const audioContent = Buffer.from(audioBuffer).toString("base64");
+
+    // Auto-detect encoding from magic bytes, fall back to mimetype
+    let encoding = "LINEAR16";
+    let sampleRateHertz = 16000;
+    if (audioBuffer.length >= 4) {
+      const b = audioBuffer;
+      if (b[0] === 0x1A && b[1] === 0x45 && b[2] === 0xDF && b[3] === 0xA3) {
+        encoding = "WEBM_OPUS"; sampleRateHertz = 48000; // EBML/WebM header
+      } else if (b[0] === 0x4F && b[1] === 0x67 && b[2] === 0x67 && b[3] === 0x53) {
+        encoding = "OGG_OPUS"; sampleRateHertz = 48000; // OggS header
+      } else if ((b[0] === 0x49 && b[1] === 0x44 && b[2] === 0x33) || (b[0] === 0xFF && (b[1] & 0xE0) === 0xE0)) {
+        encoding = "MP3"; sampleRateHertz = 16000; // ID3 tag or MPEG sync
+      } else if (b[0] === 0x52 && b[1] === 0x49 && b[2] === 0x46 && b[3] === 0x46) {
+        encoding = "LINEAR16"; sampleRateHertz = 16000; // RIFF/WAV header
+      } else if (b[0] === 0x66 && b[1] === 0x4C && b[2] === 0x61 && b[3] === 0x43) {
+        encoding = "FLAC"; sampleRateHertz = 16000; // fLaC header
+      } else {
+        // Fall back to mimetype
+        const mt = mimetype || "";
+        if (mt.includes("webm") || mt.includes("opus")) { encoding = "WEBM_OPUS"; sampleRateHertz = 48000; }
+        else if (mt.includes("ogg")) { encoding = "OGG_OPUS"; sampleRateHertz = 48000; }
+        else if (mt.includes("mp3") || mt.includes("mpeg")) { encoding = "MP3"; sampleRateHertz = 16000; }
+        else if (mt.includes("flac")) { encoding = "FLAC"; sampleRateHertz = 16000; }
+      }
+    }
+
+    console.log(`[google-stt] Transcribing (${locale}, ${encoding}, ${audioBuffer.length} bytes)`);
+
+    const body = {
+      config: {
+        encoding,
+        sampleRateHertz,
+        languageCode: locale,
+        enableAutomaticPunctuation: true,
+      },
+      audio: { content: audioContent },
+    };
+
+    const res = await fetch(
+      `https://speech.googleapis.com/v1/speech:recognize?key=${encodeURIComponent(apiKey)}`,
+      { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }
+    );
+
+    if (!res.ok) {
+      const errText = await res.text();
+      console.error("[google-stt] Error:", errText?.substring(0, 300));
+      return null;
+    }
+
+    const json = await res.json();
+    const transcript = json.results
+      ?.map((r) => r.alternatives?.[0]?.transcript)
+      .filter(Boolean)
+      .join(" ") || "";
+
+    console.log("[google-stt] Result:", transcript?.substring(0, 100));
+    return { text: transcript, insights: null };
+  } catch (e) {
+    console.error("[google-stt] Exception:", e.message?.substring(0, 200));
+    return null;
+  }
+};
+
 const scoreWithOpenAI = async ({
   combinedTranscript,
   language,
@@ -865,7 +1074,18 @@ YOUR SCORING PHILOSOPHY:
 - Primary focus: MESSAGE TRANSFER (Did they convey the meaning accurately?)
 - Secondary: Language quality, fluency, delivery
 - Be fair but strict - match real NAATI standards
-- 2-3 major errors per dialogue typically results in failure`;
+- 2-3 major errors per dialogue typically results in failure
+
+CRITICAL — SCORE EACH CATEGORY INDEPENDENTLY:
+- Even if message transfer is poor, the student may still speak fluently and clearly.
+- Language Quality, Fluency, and Pronunciation MUST be scored on their own merits.
+- A student who speaks fluently with good pronunciation but gets the wrong meaning should still score well on fluency/pronunciation.
+- NEVER give 0 across all categories. If the student spoke at all, fluency and pronunciation should be > 0.
+
+IMPORTANT — BACK-TRANSLATED TEXT NOTE:
+- The STUDENT transcript has been machine-translated back to English for comparison.
+- Machine translation may distort meaning — focus on whether the core message concepts match, not exact wording.
+- If the back-translation seems odd but contains key concepts from the reference, give appropriate credit.`;
 
   const userPrompt = `## SOURCE (What was said - to be interpreted):
 "${referenceText || "Not provided. Use REFERENCE transcript below."}"
@@ -1035,7 +1255,10 @@ export const runAiExam = async (req, res, next) => {
     // In CCL, segments alternate: odd segments = English source → LOTE target,
     // even segments = LOTE source → English target.
     // Build combined locales so Azure auto-detects the correct language.
-    const loteLocales = toAzureLocales(language);     // e.g. ["pa-IN"]
+    // IMPORTANT: Normalize language name→code before Azure locale lookup
+    const langCode = toLanguageCode(language) || language;
+    console.log("[scoring] language param:", language, "→ langCode:", langCode);
+    const loteLocales = toAzureLocales(langCode);     // e.g. ["pa-IN"]
     const enLocales  = ["en-AU", "en-US", "en-GB"];
     const bothLocales = [...new Set([...enLocales, ...loteLocales])]; // auto-detect
 
@@ -1049,6 +1272,8 @@ export const runAiExam = async (req, res, next) => {
     const stuLocales = isOddSegment ? loteLocales : enLocales;
     // For GPT context:
     const studentSpeaksLanguage = isOddSegment ? (language || "LOTE") : "English";
+    const languageDisplayName = toLanguageName(langCode);
+    const studentSpeaksDisplayName = isOddSegment ? languageDisplayName : "English";
 
     const uploaded = await uploadAudioToS3({
       buffer: file.buffer,
@@ -1067,6 +1292,12 @@ export const runAiExam = async (req, res, next) => {
     const cleanBuffer  = denoised ? denoised.buffer  : file.buffer;
     const cleanMimetype = denoised ? denoised.mimetype : file.mimetype;
 
+    console.log("[scoring] Starting Azure transcription...");
+    console.log("[scoring] refAudioUrl:", referenceAudioUrl?.substring(0, 60) || "(none)");
+    console.log("[scoring] sugAudioUrl:", suggestedAudioUrl?.substring(0, 60) || "(none)");
+    console.log("[scoring] translationText:", translationText?.substring(0, 60) || "(none)");
+    console.log("[scoring] loteLocales:", loteLocales, "stuLocales:", stuLocales, "bothLocales:", bothLocales);
+
     let referenceTranscript = "";
     let suggestedTranscript = "";
     let studentTranscript = "";
@@ -1075,59 +1306,202 @@ export const runAiExam = async (req, res, next) => {
     let azureSug = null;
     let azureStu = null;
 
+    // ─── Reference audio transcription ───
     if (referenceAudioUrl) {
-      try {
-        azureRef = await transcribeWithAzure({
-          audioUrl: referenceAudioUrl,
-          locales: bothLocales,
-        });
-        referenceTranscript = azureRef?.text ? String(azureRef.text) : "";
-      } catch {
-        const refAudio = await fetchAudio(referenceAudioUrl);
-        azureRef = await transcribeWithAzure({
-          buffer: refAudio.buffer,
-          mimetype: refAudio.mimetype,
-          locales: bothLocales,
-        });
-        referenceTranscript = azureRef?.text ? String(azureRef.text) : "";
+      const refLang = isOddSegment ? "en" : langCode;
+      if (refLocales.length > 0) {
+        // Azure supports this locale
+        try {
+          azureRef = await transcribeWithAzure({ audioUrl: referenceAudioUrl, locales: bothLocales });
+          referenceTranscript = azureRef?.text ? String(azureRef.text) : "";
+        } catch {
+          try {
+            const refAudio = await fetchAudio(referenceAudioUrl);
+            azureRef = await transcribeWithAzure({ buffer: refAudio.buffer, mimetype: refAudio.mimetype, locales: bothLocales });
+            referenceTranscript = azureRef?.text ? String(azureRef.text) : "";
+          } catch (refErr) {
+            console.log("[scoring] Azure ref failed twice, Whisper fallback:", refErr.message?.substring(0, 100));
+          }
+        }
+      }
+      // If Azure didn't produce a transcript (unsupported locale or failed), try Google STT then Whisper
+      if (!referenceTranscript) {
+        const gRef = await googleSTT({ audioUrl: referenceAudioUrl, mimetype: "audio/webm", language: refLang });
+        if (gRef?.text) {
+          referenceTranscript = gRef.text;
+          console.log("[scoring] Google STT reference:", referenceTranscript?.substring(0, 80));
+        }
+      }
+      if (!referenceTranscript) {
+        console.log("[scoring] Using Whisper for reference audio (lang:", refLang, ")");
+        const wRef = await whisperTranscribe({ audioUrl: referenceAudioUrl, language: refLang });
+        referenceTranscript = wRef.text;
       }
     }
 
+    // ─── Suggested audio / translation text ───
     if (translationText) {
-      // Frontend sent the correct translation text — skip Azure STT for suggested audio
       suggestedTranscript = translationText;
       console.log("✅ Using frontend-provided translationText as suggestedTranscript");
     } else if (suggestedAudioUrl) {
-      try {
-        azureSug = await transcribeWithAzure({
-          audioUrl: suggestedAudioUrl,
-          locales: bothLocales,
-        });
-        suggestedTranscript = azureSug?.text ? String(azureSug.text) : "";
-      } catch {
-        const sugAudio = await fetchAudio(suggestedAudioUrl);
-        azureSug = await transcribeWithAzure({
-          buffer: sugAudio.buffer,
-          mimetype: sugAudio.mimetype,
-          locales: bothLocales,
-        });
-        suggestedTranscript = azureSug?.text ? String(azureSug.text) : "";
+      const sugLang = isOddSegment ? langCode : "en";
+      if (sugLocales.length > 0) {
+        try {
+          azureSug = await transcribeWithAzure({ audioUrl: suggestedAudioUrl, locales: bothLocales });
+          suggestedTranscript = azureSug?.text ? String(azureSug.text) : "";
+        } catch {
+          try {
+            const sugAudio = await fetchAudio(suggestedAudioUrl);
+            azureSug = await transcribeWithAzure({ buffer: sugAudio.buffer, mimetype: sugAudio.mimetype, locales: bothLocales });
+            suggestedTranscript = azureSug?.text ? String(azureSug.text) : "";
+          } catch (sugErr) {
+            console.log("[scoring] Azure sug failed twice, Whisper fallback:", sugErr.message?.substring(0, 100));
+          }
+        }
+      }
+      if (!suggestedTranscript) {
+        const gSug = await googleSTT({ audioUrl: suggestedAudioUrl, mimetype: "audio/webm", language: sugLang });
+        if (gSug?.text) {
+          suggestedTranscript = gSug.text;
+          console.log("[scoring] Google STT suggested:", suggestedTranscript?.substring(0, 80));
+        }
+      }
+      if (!suggestedTranscript) {
+        console.log("[scoring] Using Whisper for suggested audio (lang:", sugLang, ")");
+        const wSug = await whisperTranscribe({ audioUrl: suggestedAudioUrl, language: sugLang });
+        suggestedTranscript = wSug.text;
       }
     }
 
-    azureStu = await transcribeWithAzure({
-      buffer: cleanBuffer,
-      mimetype: cleanMimetype,
-      locales: stuLocales.length ? stuLocales : bothLocales,
-    });
-    studentTranscript = azureStu?.text ? String(azureStu.text) : "";
+    // ─── Student audio transcription ───
+    if (stuLocales.length > 0) {
+      try {
+        azureStu = await transcribeWithAzure({
+          buffer: cleanBuffer,
+          mimetype: cleanMimetype,
+          locales: stuLocales,
+        });
+        studentTranscript = azureStu?.text ? String(azureStu.text) : "";
+      } catch (stuErr) {
+        console.error("[scoring] Azure student error:", stuErr.message?.substring(0, 100));
+      }
+    }
+    // Google Cloud STT fallback (better for Punjabi etc.)
+    if (!studentTranscript) {
+      const stuLang = isOddSegment ? langCode : "en";
+      const gStu = await googleSTT({ buffer: cleanBuffer, mimetype: cleanMimetype, language: stuLang });
+      if (gStu?.text) {
+        studentTranscript = gStu.text;
+        console.log("[scoring] Google STT student:", studentTranscript?.substring(0, 80));
+      }
+    }
+    // Whisper fallback if Azure didn't produce a student transcript
+    if (!studentTranscript) {
+      const stuLang = isOddSegment ? langCode : "en";
+      console.log("[scoring] Using Whisper for student audio (lang:", stuLang, ")");
+      const wStu = await whisperTranscribe({ buffer: cleanBuffer, language: stuLang });
+      studentTranscript = wStu.text;
+    }
+
+    // ─── Convert transcripts to correct LOTE script (e.g. Devanagari→Gurmukhi for Punjabi) ───
+    const scriptFix = SCRIPT_FIX_MAP[langCode];
+    if (scriptFix) {
+      // Student transcript (when student speaks LOTE)
+      if (isOddSegment && studentTranscript && scriptFix.wrong.test(studentTranscript)) {
+        const converted = await googleTranslate(studentTranscript, langCode);
+        if (converted) {
+          console.log(`[scoring] ${scriptFix.label} student:`, converted.substring(0, 80));
+          studentTranscript = converted;
+        }
+      }
+      // Reference transcript (when reference is LOTE)
+      if (!isOddSegment && referenceTranscript && scriptFix.wrong.test(referenceTranscript)) {
+        const converted = await googleTranslate(referenceTranscript, langCode);
+        if (converted) {
+          console.log(`[scoring] ${scriptFix.label} reference:`, converted.substring(0, 80));
+          referenceTranscript = converted;
+        }
+      }
+      // Suggested transcript
+      if (suggestedTranscript && scriptFix.wrong.test(suggestedTranscript)) {
+        const converted = await googleTranslate(suggestedTranscript, langCode);
+        if (converted) {
+          console.log(`[scoring] ${scriptFix.label} suggested:`, converted.substring(0, 80));
+          suggestedTranscript = converted;
+        }
+      }
+    }
+
+    // ─── Auto-generate suggested translation if missing ───
+    // Without a correct translation reference, GPT cannot properly score message transfer.
+    // Use Google Translate to create one from the segment's textContent.
+    if (!suggestedTranscript && segment.textContent) {
+      const srcText = String(segment.textContent).trim();
+      if (srcText) {
+        // Target language = what the student speaks (opposite of source)
+        const translateTo = isOddSegment ? langCode : "en";
+        const translateFrom = isOddSegment ? "en" : langCode;
+        console.log("[scoring] Auto-translating textContent for suggested (", translateFrom, "→", translateTo, ")");
+        const translated = await googleTranslate(srcText, translateTo, translateFrom);
+        if (translated) {
+          suggestedTranscript = translated;
+          console.log("[scoring] Auto-translated suggested:", translated.substring(0, 80));
+        }
+      }
+    }
+
+    // ─── Back-translate LOTE transcripts to English for GPT comparison ───
+    // GPT struggles to evaluate message transfer in non-Latin scripts (Gurmukhi, Devanagari, etc.).
+    // Translate LOTE transcripts to English so GPT can do English↔English comparison.
+    let suggestedForGPT = suggestedTranscript;
+    let studentForGPT = studentTranscript;
+    let referenceForGPT = referenceTranscript;
+
+    if (isOddSegment && langCode && langCode !== "en") {
+      // English→LOTE: student speaks LOTE, suggested is LOTE
+      // Back-translate both to English for GPT (auto-detect source — Whisper may output different script)
+      if (studentTranscript) {
+        const stuEn = await googleTranslate(studentTranscript, "en");
+        if (stuEn) {
+          studentForGPT = stuEn;
+          console.log("[scoring] Student back-translated to EN:", stuEn.substring(0, 80));
+        }
+      }
+      if (suggestedTranscript) {
+        const sugEn = await googleTranslate(suggestedTranscript, "en");
+        if (sugEn) {
+          suggestedForGPT = sugEn;
+          console.log("[scoring] Suggested back-translated to EN:", sugEn.substring(0, 80));
+        }
+      }
+    } else if (!isOddSegment && langCode && langCode !== "en") {
+      // LOTE→English: reference is LOTE, back-translate it for GPT (auto-detect source)
+      if (referenceTranscript && !/^[\x00-\x7F]*$/.test(referenceTranscript)) {
+        const refEn = await googleTranslate(referenceTranscript, "en");
+        if (refEn) {
+          referenceForGPT = refEn;
+          console.log("[scoring] Reference back-translated to EN:", refEn.substring(0, 80));
+        }
+      }
+    }
+
+    console.log("[scoring] ── Segment", segOrder, "──");
+    console.log("[scoring] direction:", isOddSegment ? "English→" + (language || "LOTE") : (language || "LOTE") + "→English");
+    console.log("[scoring] langCode:", langCode, "loteLocales:", loteLocales, "stuLocales:", stuLocales);
+    console.log("[scoring] referenceTranscript:", referenceTranscript?.substring(0, 80) || "(empty)");
+    console.log("[scoring] suggestedTranscript:", suggestedTranscript?.substring(0, 80) || "(empty)");
+    console.log("[scoring] studentTranscript:", studentTranscript?.substring(0, 80) || "(empty)");
+    console.log("[scoring] studentForGPT:", studentForGPT?.substring(0, 80) || "(empty)");
+    console.log("[scoring] suggestedForGPT:", suggestedForGPT?.substring(0, 80) || "(empty)");
 
     const combinedTranscript =
-      `SEGMENT (Segment ${segOrder}, ${isOddSegment ? "English→" + (language || "LOTE") : (language || "LOTE") + "→English"}):\n` +
-      `DIRECTION: Student must translate from ${isOddSegment ? "English" : (language || "LOTE")} into ${studentSpeaksLanguage}\n` +
-      `REFERENCE (source audio): ${referenceTranscript || "(empty)"}\n` +
-      `SUGGESTED (correct translation): ${suggestedTranscript || "(empty)"}\n` +
-      `STUDENT (speaks ${studentSpeaksLanguage}): ${studentTranscript || "(empty)"}`;
+      `SEGMENT (Segment ${segOrder}, ${isOddSegment ? "English→" + languageDisplayName : languageDisplayName + "→English"}):\n` +
+      `DIRECTION: Student must translate from ${isOddSegment ? "English" : languageDisplayName} into ${studentSpeaksDisplayName}\n` +
+      `REFERENCE (source audio - English): ${referenceForGPT || "(empty)"}\n` +
+      `SUGGESTED (correct translation - English): ${suggestedForGPT || "(empty)"}\n` +
+      `STUDENT (translated to English for comparison): ${studentForGPT || "(empty)"}\n` +
+      `STUDENT (original ${studentSpeaksDisplayName}): ${studentTranscript || "(empty)"}\n` +
+      `NOTE: "${studentSpeaksDisplayName}" is the target language. Score fluency and pronunciation based on how well the student spoke, regardless of message accuracy.`;
 
     // For pronunciation assessment, use the suggested transcript (correct translation)
     // as the reference text, since that's what the student should match
@@ -1183,6 +1557,13 @@ export const runAiExam = async (req, res, next) => {
       azureInsights,
       segmentRepeatCount: repeatCount - 1,
       dialogueRepeatCount: dialogueRepeatTotal,
+    });
+
+    console.log("[scoring] GPT result:", {
+      messageTransfer: scores.accuracy_score,
+      languageQuality: scores.language_quality_score,
+      fluency: scores.fluency_pronunciation_score,
+      finalScore: scores.final_score,
     });
 
     let segmentAttempt = null;
@@ -1244,6 +1625,8 @@ export const runAiExam = async (req, res, next) => {
       },
     });
   } catch (e) {
+    console.error("[scoring] FATAL ERROR in runAiExam:", e.message);
+    console.error("[scoring] Stack:", e.stack?.substring(0, 500));
     return next(e);
   }
 };
