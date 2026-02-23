@@ -3,7 +3,7 @@ import { requireAuth, requireAdmin } from "../middleware/auth.js";
 import { createLanguage, listLanguages, getLanguage, updateLanguage, deleteLanguage } from "../controllers/languages.controller.js";
 import { createDomain, listDomains, getDomain, updateDomain, deleteDomain } from "../controllers/domains.controller.js";
 import { createDialogue, listDialogues, getDialogue, updateDialogue, deleteDialogue } from "../controllers/dialogues.controller.js";
-import { createSegment, listSegments, getSegment, updateSegment, deleteSegment } from "../controllers/segments.controller.js";
+import { createSegment, listSegments, getSegment, updateSegment, deleteSegment, translateSegment } from "../controllers/segments.controller.js";
 import { getDashboardCounts } from "../controllers/adminDashboard.controller.js";
 import multer from "multer";
 const upload = multer({
@@ -38,6 +38,7 @@ adminContentRouter.get("/segments", listSegments);
 adminContentRouter.get("/segments/:id", getSegment);
 adminContentRouter.put("/segments/:id", updateSegment);
 adminContentRouter.delete("/segments/:id", deleteSegment);
+adminContentRouter.post("/segments/translate", translateSegment);
 
 adminContentRouter.post(
     "/segments",

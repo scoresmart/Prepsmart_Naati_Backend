@@ -7,6 +7,101 @@ function toInt(v) {
   return Number.isFinite(n) ? n : undefined;
 }
 
+/* ─── Language-name → Google-Translate code mapping ─── */
+const LANG_NAME_TO_GOOGLE_CODE = {
+  hindi: "hi", punjabi: "pa", nepali: "ne", mandarin: "zh-CN", chinese: "zh-CN",
+  cantonese: "zh-TW", spanish: "es", english: "en", urdu: "ur", tamil: "ta",
+  telugu: "te", bengali: "bn", bangla: "bn", gujarati: "gu", kannada: "kn",
+  malayalam: "ml", marathi: "mr", arabic: "ar", persian: "fa", farsi: "fa",
+  turkish: "tr", korean: "ko", japanese: "ja", vietnamese: "vi", thai: "th",
+  indonesian: "id", malay: "ms", russian: "ru", french: "fr", german: "de",
+  italian: "it", portuguese: "pt", dutch: "nl", greek: "el", polish: "pl",
+  czech: "cs", romanian: "ro", hungarian: "hu", swedish: "sv", danish: "da",
+  finnish: "fi", norwegian: "no", ukrainian: "uk", serbian: "sr", croatian: "hr",
+  bosnian: "bs", bulgarian: "bg", filipino: "tl", tagalog: "tl",
+  sinhalese: "si", sinhala: "si", khmer: "km", burmese: "my", lao: "lo", swahili: "sw",
+};
+
+function toLangCode(nameOrCode) {
+  const s = String(nameOrCode || "").trim().toLowerCase();
+  if (!s) return null;
+  if (/^[a-z]{2}(-[a-z]{2,})?$/i.test(s)) return s;
+  return LANG_NAME_TO_GOOGLE_CODE[s] || null;
+}
+
+/* ─── Google Translate v2 helper ─── */
+async function googleTranslate(text, targetLang, sourceLang = null) {
+  const apiKey = process.env.GOOGLE_TRANSLATE_API_KEY;
+  if (!apiKey) throw new Error("GOOGLE_TRANSLATE_API_KEY is not configured");
+
+  const body = { q: text, target: targetLang, format: "text" };
+  if (sourceLang) body.source = sourceLang;
+
+  const res = await fetch(
+    `https://translation.googleapis.com/language/translate/v2?key=${encodeURIComponent(apiKey)}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }
+  );
+
+  if (!res.ok) {
+    const errText = await res.text();
+    throw new Error(`Google Translate error (${res.status}): ${errText}`);
+  }
+
+  const json = await res.json();
+  const translated = json?.data?.translations?.[0]?.translatedText;
+  const detectedSource = json?.data?.translations?.[0]?.detectedSourceLanguage || sourceLang;
+  if (!translated) throw new Error("No translation returned from Google");
+
+  return { translatedText: translated, detectedSource };
+}
+
+/* ─── Translate endpoint ─── */
+export async function translateSegment(req, res, next) {
+  try {
+    const { text, targetLanguage, sourceLanguage, segmentId, dialogueId } = req.body;
+
+    // Resolve the text to translate — either explicit or from a segment
+    let inputText = text;
+    if (!inputText && segmentId) {
+      const seg = await models.Segment.findByPk(segmentId);
+      if (!seg) return res.status(404).json({ success: false, message: "Segment not found" });
+      inputText = seg.textContent;
+    }
+    if (!inputText) return res.status(400).json({ success: false, message: "text or segmentId is required" });
+
+    // Resolve target language — from param, or from dialogueId → Language.langCode
+    let target = toLangCode(targetLanguage);
+    if (!target && dialogueId) {
+      const dlg = await models.Dialogue.findByPk(dialogueId, {
+        include: [{ model: models.Language, as: "Language" }],
+      });
+      if (dlg?.Language) target = toLangCode(dlg.Language.langCode) || toLangCode(dlg.Language.name);
+    }
+    if (!target) return res.status(400).json({ success: false, message: "Could not determine target language" });
+
+    const source = toLangCode(sourceLanguage) || null; // auto-detect if not provided
+
+    const result = await googleTranslate(inputText, target, source);
+
+    return res.json({
+      success: true,
+      data: {
+        originalText: inputText,
+        translatedText: result.translatedText,
+        sourceLang: result.detectedSource,
+        targetLang: target,
+      },
+    });
+  } catch (e) {
+    console.error("Translate error:", e.message);
+    return next(e);
+  }
+}
+
 export async function createSegment(req, res, next) {
   try {
     const {
