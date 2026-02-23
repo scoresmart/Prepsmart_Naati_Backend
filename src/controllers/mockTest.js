@@ -551,6 +551,7 @@ const azureFastTranscribe = async ({
   mimetype,
   audioUrl,
   language,
+  locales: overrideLocales,
 }) => {
   const key = process.env.AZURE_SPEECH_KEY;
   const base = makeAzureSpeechBaseEndpoint();
@@ -564,7 +565,7 @@ const azureFastTranscribe = async ({
     apiVersion
   )}`;
 
-  const locales = toAzureLocales(language);
+  const locales = overrideLocales || toAzureLocales(language);
   const definition = {};
   if (locales.length) definition.locales = locales;
   if (audioUrl) definition.audioUrl = audioUrl;
@@ -832,8 +833,9 @@ const transcribeWithAzure = async ({
   mimetype,
   audioUrl,
   language,
+  locales,
 }) => {
-  return azureFastTranscribe({ buffer, mimetype, audioUrl, language });
+  return azureFastTranscribe({ buffer, mimetype, audioUrl, language, locales });
 };
 
 const scoreWithOpenAI = async ({
@@ -1025,6 +1027,25 @@ export const runAiExam = async (req, res, next) => {
       });
     }
 
+    // --- CCL language handling ---
+    // In CCL, segments alternate: odd segments = English source → LOTE target,
+    // even segments = LOTE source → English target.
+    // Build combined locales so Azure auto-detects the correct language.
+    const loteLocales = toAzureLocales(language);     // e.g. ["pa-IN"]
+    const enLocales  = ["en-AU", "en-US", "en-GB"];
+    const bothLocales = [...new Set([...enLocales, ...loteLocales])]; // auto-detect
+
+    const segOrder = segment.segmentOrder || 1;
+    const isOddSegment = segOrder % 2 === 1;  // odd = English→LOTE
+    // Reference audio language (source):
+    const refLocales = isOddSegment ? enLocales : loteLocales;
+    // Suggested audio language (target = opposite of source):
+    const sugLocales = isOddSegment ? loteLocales : enLocales;
+    // Student speaks the TARGET language:
+    const stuLocales = isOddSegment ? loteLocales : enLocales;
+    // For GPT context:
+    const studentSpeaksLanguage = isOddSegment ? (language || "LOTE") : "English";
+
     const uploaded = await uploadAudioToS3({
       buffer: file.buffer,
       mimetype: file.mimetype,
@@ -1046,7 +1067,7 @@ export const runAiExam = async (req, res, next) => {
       try {
         azureRef = await transcribeWithAzure({
           audioUrl: referenceAudioUrl,
-          language,
+          locales: bothLocales,
         });
         referenceTranscript = azureRef?.text ? String(azureRef.text) : "";
       } catch {
@@ -1054,7 +1075,7 @@ export const runAiExam = async (req, res, next) => {
         azureRef = await transcribeWithAzure({
           buffer: refAudio.buffer,
           mimetype: refAudio.mimetype,
-          language,
+          locales: bothLocales,
         });
         referenceTranscript = azureRef?.text ? String(azureRef.text) : "";
       }
@@ -1064,7 +1085,7 @@ export const runAiExam = async (req, res, next) => {
       try {
         azureSug = await transcribeWithAzure({
           audioUrl: suggestedAudioUrl,
-          language,
+          locales: bothLocales,
         });
         suggestedTranscript = azureSug?.text ? String(azureSug.text) : "";
       } catch {
@@ -1072,7 +1093,7 @@ export const runAiExam = async (req, res, next) => {
         azureSug = await transcribeWithAzure({
           buffer: sugAudio.buffer,
           mimetype: sugAudio.mimetype,
-          language,
+          locales: bothLocales,
         });
         suggestedTranscript = azureSug?.text ? String(azureSug.text) : "";
       }
@@ -1081,26 +1102,30 @@ export const runAiExam = async (req, res, next) => {
     azureStu = await transcribeWithAzure({
       buffer: file.buffer,
       mimetype: file.mimetype,
-      language,
+      locales: stuLocales.length ? stuLocales : bothLocales,
     });
     studentTranscript = azureStu?.text ? String(azureStu.text) : "";
 
     const combinedTranscript =
-      `SEGMENT:\n` +
-      `REFERENCE: ${referenceTranscript || "(empty)"}\n` +
-      `SUGGESTED: ${suggestedTranscript || "(empty)"}\n` +
-      `STUDENT: ${studentTranscript || "(empty)"}`;
+      `SEGMENT (Segment ${segOrder}, ${isOddSegment ? "English→" + (language || "LOTE") : (language || "LOTE") + "→English"}):\n` +
+      `DIRECTION: Student must translate from ${isOddSegment ? "English" : (language || "LOTE")} into ${studentSpeaksLanguage}\n` +
+      `REFERENCE (source audio): ${referenceTranscript || "(empty)"}\n` +
+      `SUGGESTED (correct translation): ${suggestedTranscript || "(empty)"}\n` +
+      `STUDENT (speaks ${studentSpeaksLanguage}): ${studentTranscript || "(empty)"}`;
 
+    // For pronunciation assessment, use the suggested transcript (correct translation)
+    // as the reference text, since that's what the student should match
     const pronRefText =
+      (suggestedTranscript && String(suggestedTranscript).trim()) ||
       (segment.textContent && String(segment.textContent).trim()) ||
       (referenceTranscript && String(referenceTranscript).trim()) ||
-      (suggestedTranscript && String(suggestedTranscript).trim()) ||
       "";
 
+    // Use the student's speaking language for pronunciation assessment
     const studentPron = await azurePronunciationAssessmentShort({
       buffer: file.buffer,
       mimetype: file.mimetype,
-      language,
+      language: studentSpeaksLanguage,
       referenceText: pronRefText,
     });
 
