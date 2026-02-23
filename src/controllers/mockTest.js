@@ -1,6 +1,7 @@
 import path from "node:path";
 import { models } from "../models/index.js";
 import { uploadAudioToS3 } from "../utils/aws.js";
+import { denoiseAudio } from "../utils/audioDenoise.js";
 
 const { Segment, Dialogue, SegmentAttempt } = models;
 
@@ -1055,6 +1056,14 @@ export const runAiExam = async (req, res, next) => {
 
     const userAudioUrl = uploaded.url;
 
+    // ─── Denoise student audio before sending to Azure ───
+    const denoised = await denoiseAudio({
+      buffer: file.buffer,
+      mimetype: file.mimetype,
+    });
+    const cleanBuffer  = denoised ? denoised.buffer  : file.buffer;
+    const cleanMimetype = denoised ? denoised.mimetype : file.mimetype;
+
     let referenceTranscript = "";
     let suggestedTranscript = "";
     let studentTranscript = "";
@@ -1100,8 +1109,8 @@ export const runAiExam = async (req, res, next) => {
     }
 
     azureStu = await transcribeWithAzure({
-      buffer: file.buffer,
-      mimetype: file.mimetype,
+      buffer: cleanBuffer,
+      mimetype: cleanMimetype,
       locales: stuLocales.length ? stuLocales : bothLocales,
     });
     studentTranscript = azureStu?.text ? String(azureStu.text) : "";
@@ -1123,8 +1132,8 @@ export const runAiExam = async (req, res, next) => {
 
     // Use the student's speaking language for pronunciation assessment
     const studentPron = await azurePronunciationAssessmentShort({
-      buffer: file.buffer,
-      mimetype: file.mimetype,
+      buffer: cleanBuffer,
+      mimetype: cleanMimetype,
       language: studentSpeaksLanguage,
       referenceText: pronRefText,
     });
