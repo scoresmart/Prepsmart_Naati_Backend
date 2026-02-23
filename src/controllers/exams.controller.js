@@ -172,10 +172,45 @@ export const computeResult = async (req, res, next) => {
         .status(404)
         .json({ success: false, message: "ExamAttempt not found" });
 
-    const segmentAttempts = await SegmentAttempt.findAll({
+    let segmentAttempts = await SegmentAttempt.findAll({
       where: { examAttemptId: examAttemptId },
       order: [["createdAt", "ASC"]],
     });
+
+    // If this attempt has no segments, try to find the latest attempt
+    // for the same user+dialogue that HAS submitted segments (fallback)
+    let usedAttempt = attempt;
+    if (!segmentAttempts.length) {
+      // Find the latest segment_attempt for this user+dialogue regardless of exam attempt
+      const latestSA = await SegmentAttempt.findOne({
+        where: { userId: attempt.userId },
+        order: [["id", "DESC"]],
+        attributes: ["examAttemptId"],
+      });
+
+      if (latestSA && latestSA.examAttemptId !== attempt.id) {
+        // Verify this exam attempt belongs to the same dialogue
+        const fallback = await ExamAttempt.findOne({
+          where: {
+            id: latestSA.examAttemptId,
+            userId: attempt.userId,
+            dialogueId: attempt.dialogueId,
+          },
+        });
+
+        if (fallback) {
+          const fallbackSegments = await SegmentAttempt.findAll({
+            where: { examAttemptId: fallback.id },
+            order: [["createdAt", "ASC"]],
+          });
+          if (fallbackSegments.length) {
+            segmentAttempts = fallbackSegments;
+            usedAttempt = fallback;
+            console.log(`[computeResult] Falling back from attempt ${attempt.id} (0 segments) to ${fallback.id} (${fallbackSegments.length} segments)`);
+          }
+        }
+      }
+    }
 
     // Enrich each SegmentAttempt with original Segment data
     const segmentIds = segmentAttempts.map(sa => sa.segmentId).filter(Boolean);
@@ -259,7 +294,7 @@ export const computeResult = async (req, res, next) => {
       console.error("Failed to generate overall feedback:", feedbackErr.message);
     }
 
-    const updated = await attempt.update({
+    const updated = await usedAttempt.update({
       accuracyScore: averages.accuracyScore,
       languageQualityScore: averages.languageQualityScore,
       fluencyPronunciationScore: averages.fluencyPronunciationScore,
