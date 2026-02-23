@@ -59,10 +59,21 @@ async function googleTranslate(text, targetLang, sourceLang = null) {
   return { translatedText: translated, detectedSource };
 }
 
+/* ─── Helper: look up dialogue LOTE language code ─── */
+async function getDialogueLoteCode(dialogueId) {
+  if (!dialogueId) return null;
+  const dlg = await models.Dialogue.findByPk(dialogueId, {
+    include: [{ model: models.Language, as: "Language" }],
+  });
+  if (!dlg?.Language) return null;
+  return toLangCode(dlg.Language.langCode) || toLangCode(dlg.Language.name);
+}
+
 /* ─── Translate endpoint ─── */
 export async function translateSegment(req, res, next) {
   try {
     const { text, targetLanguage, sourceLanguage, segmentId, dialogueId } = req.body;
+    console.log("[translate] params:", { text: text?.substring(0, 60), targetLanguage, sourceLanguage, segmentId, dialogueId });
 
     // Resolve the text to translate — either explicit or from a segment
     let inputText = text;
@@ -75,38 +86,105 @@ export async function translateSegment(req, res, next) {
 
     // Resolve LOTE language — from param, or from dialogueId → Language.langCode
     let loteCode = toLangCode(targetLanguage);
-    if (!loteCode && dialogueId) {
-      const dlg = await models.Dialogue.findByPk(dialogueId, {
-        include: [{ model: models.Language, as: "Language" }],
-      });
-      if (dlg?.Language) loteCode = toLangCode(dlg.Language.langCode) || toLangCode(dlg.Language.name);
+    const dialogueLote = await getDialogueLoteCode(dialogueId);
+    if (!loteCode && dialogueLote) {
+      loteCode = dialogueLote;
     }
     if (!loteCode) return res.status(400).json({ success: false, message: "Could not determine target language" });
 
     const source = toLangCode(sourceLanguage) || null; // auto-detect if not provided
 
-    // Bidirectional: first translate to LOTE, then check if source was already LOTE
+    // Guard: if source and target are the same language, swap direction
+    const sourceBase = (source || "").split("-")[0].toLowerCase();
+    const loteBase0 = loteCode.split("-")[0].toLowerCase();
+    if (source && sourceBase === loteBase0) {
+      console.log("[translate] same-language guard hit:", sourceBase, "===", loteBase0);
+      // Use the dialogue's LOTE language as the real target
+      if (dialogueLote && dialogueLote.split("-")[0].toLowerCase() !== sourceBase) {
+        loteCode = dialogueLote;
+        console.log("[translate] swapped target to dialogue LOTE:", loteCode);
+      } else if (sourceBase === "en") {
+        // English text, English target → no meaningful translation possible
+        return res.json({
+          success: true,
+          data: { originalText: inputText, translatedText: inputText, sourceLang: "en", targetLang: "en" },
+        });
+      } else {
+        // LOTE text, LOTE target → translate to English
+        loteCode = "en";
+        console.log("[translate] swapped target to English");
+      }
+    }
+
+    console.log("[translate] calling Google:", { source, target: loteCode });
+
+    // Translate to the resolved target
     let result;
     try {
       result = await googleTranslate(inputText, loteCode, source);
     } catch (err) {
-      // "Bad language pair" means source === target — return original text unchanged
+      // "Bad language pair" means source === target — try to recover
       if (/bad language pair/i.test(err.message)) {
-        return res.json({
-          success: true,
-          data: { originalText: inputText, translatedText: inputText, sourceLang: loteCode, targetLang: loteCode },
-        });
+        console.log("[translate] bad language pair caught, attempting recovery");
+        // Try using dialogue LOTE if available and different
+        if (dialogueLote && dialogueLote.split("-")[0].toLowerCase() !== loteCode.split("-")[0].toLowerCase()) {
+          result = await googleTranslate(inputText, dialogueLote, null);
+          return res.json({
+            success: true,
+            data: {
+              originalText: inputText,
+              translatedText: result.translatedText,
+              sourceLang: result.detectedSource,
+              targetLang: dialogueLote,
+            },
+          });
+        }
+        // Try flipping: if target was LOTE, try English; if English, try dialogue LOTE
+        const flipTarget = loteCode.split("-")[0].toLowerCase() === "en" ? (dialogueLote || "pa") : "en";
+        try {
+          result = await googleTranslate(inputText, flipTarget, null);
+          return res.json({
+            success: true,
+            data: {
+              originalText: inputText,
+              translatedText: result.translatedText,
+              sourceLang: result.detectedSource,
+              targetLang: flipTarget,
+            },
+          });
+        } catch (_) {
+          // Ultimate fallback: return original text
+          return res.json({
+            success: true,
+            data: { originalText: inputText, translatedText: inputText, sourceLang: loteCode, targetLang: loteCode },
+          });
+        }
       }
       throw err;
     }
     const detectedBase = (result.detectedSource || "").toLowerCase().split("-")[0];
     const loteBase = loteCode.toLowerCase().split("-")[0];
 
+    console.log("[translate] result:", { detectedBase, loteBase, translated: result.translatedText?.substring(0, 60) });
+
     // If the detected source language matches the LOTE target, the text is already
     // in LOTE — translate to English instead
     if (detectedBase === loteBase) {
       if (loteBase === "en") {
-        // Both source and target are English — nothing to translate
+        // Both source and target are English — try dialogue LOTE instead
+        if (dialogueLote && dialogueLote.split("-")[0].toLowerCase() !== "en") {
+          console.log("[translate] en→en detected, retrying with dialogue LOTE:", dialogueLote);
+          const loteResult = await googleTranslate(inputText, dialogueLote, "en");
+          return res.json({
+            success: true,
+            data: {
+              originalText: inputText,
+              translatedText: loteResult.translatedText,
+              sourceLang: "en",
+              targetLang: dialogueLote,
+            },
+          });
+        }
         return res.json({
           success: true,
           data: { originalText: inputText, translatedText: inputText, sourceLang: "en", targetLang: "en" },
