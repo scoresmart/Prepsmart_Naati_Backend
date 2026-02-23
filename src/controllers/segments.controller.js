@@ -86,13 +86,32 @@ export async function translateSegment(req, res, next) {
     const source = toLangCode(sourceLanguage) || null; // auto-detect if not provided
 
     // Bidirectional: first translate to LOTE, then check if source was already LOTE
-    const result = await googleTranslate(inputText, loteCode, source);
+    let result;
+    try {
+      result = await googleTranslate(inputText, loteCode, source);
+    } catch (err) {
+      // "Bad language pair" means source === target — return original text unchanged
+      if (/bad language pair/i.test(err.message)) {
+        return res.json({
+          success: true,
+          data: { originalText: inputText, translatedText: inputText, sourceLang: loteCode, targetLang: loteCode },
+        });
+      }
+      throw err;
+    }
     const detectedBase = (result.detectedSource || "").toLowerCase().split("-")[0];
     const loteBase = loteCode.toLowerCase().split("-")[0];
 
     // If the detected source language matches the LOTE target, the text is already
     // in LOTE — translate to English instead
     if (detectedBase === loteBase) {
+      if (loteBase === "en") {
+        // Both source and target are English — nothing to translate
+        return res.json({
+          success: true,
+          data: { originalText: inputText, translatedText: inputText, sourceLang: "en", targetLang: "en" },
+        });
+      }
       const enResult = await googleTranslate(inputText, "en", loteCode);
       return res.json({
         success: true,
