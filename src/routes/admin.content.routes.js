@@ -7,7 +7,8 @@ import { createSegment, listSegments, getSegment, updateSegment, deleteSegment, 
 import { getDashboardCounts } from "../controllers/adminDashboard.controller.js";
 import multer from "multer";
 const upload = multer({
-    storage: multer.memoryStorage()
+    storage: multer.memoryStorage(),
+    limits: { fileSize: 25 * 1024 * 1024 },  // 25 MB per file
   });
 export const adminContentRouter = Router();
 import getDashboardStats from "../controllers/dashboard.controller.js";
