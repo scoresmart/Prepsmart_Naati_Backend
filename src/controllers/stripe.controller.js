@@ -24,6 +24,14 @@ function priceIdFromType(type) {
   return null;
 }
 
+function planTypeFromPriceId(priceId) {
+  if (!priceId) return null;
+  if (priceId === process.env.STRIPE_MONTHLY_PRICE_ID) return "one";
+  if (priceId === process.env.STRIPE_TWO_MONTHLY_PRICE_ID) return "two";
+  if (priceId === process.env.STRIPE_THREE_MONTHLY_PRICE_ID) return "three";
+  return null;
+}
+
 function unixToDate(sec) {
   if (!sec) return null;
   return new Date(sec * 1000);
@@ -172,6 +180,11 @@ async function handleInvoiceCreateTransaction({ invoiceId, txStatus }) {
     const stripePriceIdFromSub = getPriceIdFromSub(sub);
     const stripePriceIdFromInv = getPriceIdFromInvoice(inv);
 
+    const planType =
+      sub.metadata?.planType ||
+      planTypeFromPriceId(stripePriceIdFromSub || stripePriceIdFromInv) ||
+      undefined;
+
     await upsertSubscriptionRow(
       {
         userId,
@@ -181,6 +194,7 @@ async function handleInvoiceCreateTransaction({ invoiceId, txStatus }) {
         cancelAtPeriodEnd: sub.cancel_at_period_end,
         currentPeriodEnd,
         stripePriceId: stripePriceIdFromSub || stripePriceIdFromInv,
+        planType,
       },
       t
     );
@@ -194,7 +208,7 @@ async function handleInvoiceCreateTransaction({ invoiceId, txStatus }) {
         stripePriceId: stripePriceIdFromInv || stripePriceIdFromSub,
         amount:
           txStatus === "paid" ? inv.amount_paid || 0 : inv.amount_due || 0,
-        currency: inv.currency || "usd",
+        currency: inv.currency || "aud",
         status: txStatus,
         paidAt:
           txStatus === "paid"
@@ -338,7 +352,7 @@ export async function verifyCheckoutSession(req, res) {
               stripeSubscriptionId: subscription.id,
               stripePriceId: invoicePriceId || stripePriceId,
               amount: inv.amount_paid || 0,
-              currency: inv.currency || "usd",
+              currency: inv.currency || "aud",
               status: "paid",
               paidAt: unixToDate(inv.status_transitions?.paid_at),
             },
@@ -460,7 +474,7 @@ export async function stripeWebhook(req, res) {
                 getPriceIdFromInvoice(latestInvoiceObj) ||
                 getPriceIdFromSub(sub),
               amount: latestInvoiceObj.amount_paid || 0,
-              currency: latestInvoiceObj.currency || "usd",
+              currency: latestInvoiceObj.currency || "aud",
               status: "paid",
               paidAt: unixToDate(latestInvoiceObj.status_transitions?.paid_at),
             },
@@ -493,6 +507,10 @@ export async function stripeWebhook(req, res) {
 
         const currentPeriodEnd = getCurrentPeriodEndFromSub(sub);
         const stripePriceId = getPriceIdFromSub(sub);
+        const planType =
+          sub.metadata?.planType ||
+          planTypeFromPriceId(stripePriceId) ||
+          undefined;
 
         await upsertSubscriptionRow(
           {
@@ -503,6 +521,7 @@ export async function stripeWebhook(req, res) {
             cancelAtPeriodEnd: sub.cancel_at_period_end,
             currentPeriodEnd,
             stripePriceId,
+            planType,
           },
           t
         );

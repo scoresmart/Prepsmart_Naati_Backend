@@ -1163,12 +1163,26 @@ Return ONLY valid JSON matching the required schema.`;
 
   const json = await res.json();
   const text = extractResponseText(json);
-  const parsed = JSON.parse(text);
+  if (!text || !String(text).trim()) {
+    throw new Error("Scoring parse error: empty model output");
+  }
+
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch (err) {
+    throw new Error(
+      `Scoring parse error: ${err.message}; output=${String(text).slice(0, 300)}`
+    );
+  }
+
   return normalizeScores(parsed);
 };
 
 export const runAiRapidReview = async (req, res, next) => {
+  let stage = "init";
   try {
+    stage = "validate_file";
     const file = req.file;
     if (!file?.buffer)
       return res
@@ -1254,6 +1268,7 @@ export const runAiRapidReview = async (req, res, next) => {
       });
     }
 
+    stage = "upload_user_audio";
     const uploaded = await uploadAudioToS3({
       buffer: file.buffer,
       mimetype: file.mimetype,
@@ -1293,6 +1308,7 @@ export const runAiRapidReview = async (req, res, next) => {
     let azureStu = null;
 
     // ─── Reference audio transcription ───
+    stage = "transcribe_reference_audio";
     if (referenceAudioUrl) {
       const refLang = isOddSegment ? "en" : langCode;
       if (refLocales.length > 0) {
@@ -1324,6 +1340,7 @@ export const runAiRapidReview = async (req, res, next) => {
     }
 
     // ─── Suggested audio / translation text ───
+    stage = "transcribe_suggested_audio";
     if (translationText) {
       suggestedTranscript = translationText;
       console.log("✅ Using frontend-provided translationText as suggestedTranscript (rapid review)");
@@ -1358,6 +1375,7 @@ export const runAiRapidReview = async (req, res, next) => {
     }
 
     // ─── Student audio transcription ───
+    stage = "transcribe_student_audio";
     if (stuLocales.length > 0) {
       try {
         azureStu = await transcribeWithAzure({
@@ -1519,6 +1537,7 @@ export const runAiRapidReview = async (req, res, next) => {
     });
     console.log(scores);
 
+    stage = "save_attempt";
     const rapidReviewAttempt = await RapidReviewAttempt.create({
       rapidReviewId,
       userId: authUserId,
@@ -1566,6 +1585,12 @@ export const runAiRapidReview = async (req, res, next) => {
       },
     });
   } catch (e) {
+    console.error(
+      `[rapid-scoring] FATAL stage=${stage} rrId=${req?.body?.rapidReviewId} segmentId=${req?.body?.segmentId} userId=${req?.body?.userId}: ${e?.message}`
+    );
+    if (e?.stack) {
+      console.error("[rapid-scoring] Stack:", String(e.stack).substring(0, 1000));
+    }
     return next(e);
   }
 };

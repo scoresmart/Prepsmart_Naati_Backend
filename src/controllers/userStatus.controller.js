@@ -40,6 +40,7 @@ const getActiveSubscriptions = async (userId) => {
       "cancelAtPeriodEnd",
       "stripeSubscriptionId",
       "stripePriceId",
+      "planType",
     ],
     order: [["currentPeriodEnd", "DESC"]],
   });
@@ -53,6 +54,7 @@ const getActiveSubscriptions = async (userId) => {
     cancelAtPeriodEnd: !!s.cancelAtPeriodEnd,
     stripeSubscriptionId: s.stripeSubscriptionId,
     stripePriceId: s.stripePriceId ?? null,
+    planType: s.planType ?? null,
   }));
 };
 

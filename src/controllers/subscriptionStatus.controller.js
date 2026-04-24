@@ -45,6 +45,7 @@ function mapSubWithUser(row) {
           stripeSubscriptionId: sub.stripeSubscriptionId,
           stripePriceId: sub.stripePriceId,
           stripeCustomerId: sub.stripeCustomerId,
+          planType: sub.planType ?? null,
           createdAt: sub.createdAt,
           updatedAt: sub.updatedAt,
           language: sub.language || null,
