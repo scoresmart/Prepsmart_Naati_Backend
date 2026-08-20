@@ -5,6 +5,7 @@ import { sequelize } from "../config/db.js";
 import { User } from "../models/user.model.js";
 import { Subscription } from "../models/subscription.model.js";
 import { Transaction } from "../models/transaction.model.js";
+import { sendPaymentConfirmationEmail } from "../utils/email.js";
 
 dotenv.config();
 
@@ -465,6 +466,23 @@ export async function stripeWebhook(req, res) {
           t
         );
       });
+
+      // Send payment confirmation email. Deliberately outside the transaction
+      // and swallowed on failure - a bounced email must never fail the webhook,
+      // or Stripe retries it and the subscription is written twice.
+      try {
+        const sessionUserId = await resolveUserIdFromAny({ session, stripeSub: sub, stripeCustomerId, t: null });
+        if (sessionUserId) {
+          const user = await User.findByPk(sessionUserId, { attributes: ["email", "name"] });
+          if (user?.email) {
+            const confirmedPlanType = session.metadata?.planType || sub.metadata?.planType || null;
+            const confirmedPeriodEnd = getCurrentPeriodEndFromSub(sub);
+            await sendPaymentConfirmationEmail(user.email, user.name || "there", confirmedPlanType, confirmedPeriodEnd);
+          }
+        }
+      } catch (emailErr) {
+        console.error("[Stripe webhook] payment confirmation email failed:", emailErr.message);
+      }
 
       const latestInvoiceObj =
         typeof sub.latest_invoice === "string"
