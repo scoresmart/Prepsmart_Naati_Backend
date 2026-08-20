@@ -1,0 +1,399 @@
+import { models } from "../models/index.js";
+import { uploadAudioToS3 } from "../utils/aws.js";
+
+function toInt(v) {
+  if (v === undefined || v === null || v === "") return undefined;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : undefined;
+}
+
+/* ─── Language-name → Google-Translate code mapping ─── */
+const LANG_NAME_TO_GOOGLE_CODE = {
+  hindi: "hi", punjabi: "pa", nepali: "ne", mandarin: "zh-CN", chinese: "zh-CN",
+  cantonese: "zh-TW", spanish: "es", english: "en", urdu: "ur", tamil: "ta",
+  telugu: "te", bengali: "bn", bangla: "bn", gujarati: "gu", kannada: "kn",
+  malayalam: "ml", marathi: "mr", arabic: "ar", persian: "fa", farsi: "fa",
+  turkish: "tr", korean: "ko", japanese: "ja", vietnamese: "vi", thai: "th",
+  indonesian: "id", malay: "ms", russian: "ru", french: "fr", german: "de",
+  italian: "it", portuguese: "pt", dutch: "nl", greek: "el", polish: "pl",
+  czech: "cs", romanian: "ro", hungarian: "hu", swedish: "sv", danish: "da",
+  finnish: "fi", norwegian: "no", ukrainian: "uk", serbian: "sr", croatian: "hr",
+  bosnian: "bs", bulgarian: "bg", filipino: "tl", tagalog: "tl",
+  sinhalese: "si", sinhala: "si", khmer: "km", burmese: "my", lao: "lo", swahili: "sw",
+};
+
+function toLangCode(nameOrCode) {
+  const s = String(nameOrCode || "").trim().toLowerCase();
+  if (!s) return null;
+  if (/^[a-z]{2}(-[a-z]{2,})?$/i.test(s)) return s;
+  return LANG_NAME_TO_GOOGLE_CODE[s] || null;
+}
+
+/* ─── Google Translate v2 helper ─── */
+async function googleTranslate(text, targetLang, sourceLang = null) {
+  const apiKey = process.env.GOOGLE_TRANSLATE_API_KEY;
+  if (!apiKey) throw new Error("GOOGLE_TRANSLATE_API_KEY is not configured");
+
+  const body = { q: text, target: targetLang, format: "text" };
+  if (sourceLang) body.source = sourceLang;
+
+  const res = await fetch(
+    `https://translation.googleapis.com/language/translate/v2?key=${encodeURIComponent(apiKey)}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }
+  );
+
+  if (!res.ok) {
+    const errText = await res.text();
+    throw new Error(`Google Translate error (${res.status}): ${errText}`);
+  }
+
+  const json = await res.json();
+  const translated = json?.data?.translations?.[0]?.translatedText;
+  const detectedSource = json?.data?.translations?.[0]?.detectedSourceLanguage || sourceLang;
+  if (!translated) throw new Error("No translation returned from Google");
+
+  return { translatedText: translated, detectedSource };
+}
+
+/* ─── Helper: look up dialogue LOTE language code ─── */
+async function getDialogueLoteCode(dialogueId) {
+  if (!dialogueId) return null;
+  const dlg = await models.Dialogue.findByPk(dialogueId, {
+    include: [{ model: models.Language, as: "Language" }],
+  });
+  if (!dlg?.Language) return null;
+  return toLangCode(dlg.Language.langCode) || toLangCode(dlg.Language.name);
+}
+
+/* ─── Translate endpoint ─── */
+export async function translateSegment(req, res, next) {
+  try {
+    const { text, targetLanguage, sourceLanguage, segmentId, dialogueId } = req.body;
+    console.log("[translate] params:", { text: text?.substring(0, 60), targetLanguage, sourceLanguage, segmentId, dialogueId });
+
+    // Resolve the text to translate — either explicit or from a segment
+    let inputText = text;
+    if (!inputText && segmentId) {
+      const seg = await models.Segment.findByPk(segmentId);
+      if (!seg) return res.status(404).json({ success: false, message: "Segment not found" });
+      inputText = seg.textContent;
+    }
+    if (!inputText) return res.status(400).json({ success: false, message: "text or segmentId is required" });
+
+    // Resolve LOTE language — from param, or from dialogueId → Language.langCode
+    let loteCode = toLangCode(targetLanguage);
+    const dialogueLote = await getDialogueLoteCode(dialogueId);
+    if (!loteCode && dialogueLote) {
+      loteCode = dialogueLote;
+    }
+    if (!loteCode) return res.status(400).json({ success: false, message: "Could not determine target language" });
+
+    const source = toLangCode(sourceLanguage) || null; // auto-detect if not provided
+
+    // Guard: if source and target are the same language, swap direction
+    const sourceBase = (source || "").split("-")[0].toLowerCase();
+    const loteBase0 = loteCode.split("-")[0].toLowerCase();
+    if (source && sourceBase === loteBase0) {
+      console.log("[translate] same-language guard hit:", sourceBase, "===", loteBase0);
+      // Use the dialogue's LOTE language as the real target
+      if (dialogueLote && dialogueLote.split("-")[0].toLowerCase() !== sourceBase) {
+        loteCode = dialogueLote;
+        console.log("[translate] swapped target to dialogue LOTE:", loteCode);
+      } else if (sourceBase === "en") {
+        // English text, English target → no meaningful translation possible
+        return res.json({
+          success: true,
+          data: { originalText: inputText, translatedText: inputText, sourceLang: "en", targetLang: "en" },
+        });
+      } else {
+        // LOTE text, LOTE target → translate to English
+        loteCode = "en";
+        console.log("[translate] swapped target to English");
+      }
+    }
+
+    console.log("[translate] calling Google:", { source, target: loteCode });
+
+    // Translate to the resolved target
+    let result;
+    try {
+      result = await googleTranslate(inputText, loteCode, source);
+    } catch (err) {
+      // "Bad language pair" means source === target — try to recover
+      if (/bad language pair/i.test(err.message)) {
+        console.log("[translate] bad language pair caught, attempting recovery");
+        // Try using dialogue LOTE if available and different
+        if (dialogueLote && dialogueLote.split("-")[0].toLowerCase() !== loteCode.split("-")[0].toLowerCase()) {
+          result = await googleTranslate(inputText, dialogueLote, null);
+          return res.json({
+            success: true,
+            data: {
+              originalText: inputText,
+              translatedText: result.translatedText,
+              sourceLang: result.detectedSource,
+              targetLang: dialogueLote,
+            },
+          });
+        }
+        // Try flipping: if target was LOTE, try English; if English, try dialogue LOTE
+        const flipTarget = loteCode.split("-")[0].toLowerCase() === "en" ? (dialogueLote || "pa") : "en";
+        try {
+          result = await googleTranslate(inputText, flipTarget, null);
+          return res.json({
+            success: true,
+            data: {
+              originalText: inputText,
+              translatedText: result.translatedText,
+              sourceLang: result.detectedSource,
+              targetLang: flipTarget,
+            },
+          });
+        } catch (_) {
+          // Ultimate fallback: return original text
+          return res.json({
+            success: true,
+            data: { originalText: inputText, translatedText: inputText, sourceLang: loteCode, targetLang: loteCode },
+          });
+        }
+      }
+      throw err;
+    }
+    const detectedBase = (result.detectedSource || "").toLowerCase().split("-")[0];
+    const loteBase = loteCode.toLowerCase().split("-")[0];
+
+    console.log("[translate] result:", { detectedBase, loteBase, translated: result.translatedText?.substring(0, 60) });
+
+    // If the detected source language matches the LOTE target, the text is already
+    // in LOTE — translate to English instead
+    if (detectedBase === loteBase) {
+      if (loteBase === "en") {
+        // Both source and target are English — try dialogue LOTE instead
+        if (dialogueLote && dialogueLote.split("-")[0].toLowerCase() !== "en") {
+          console.log("[translate] en→en detected, retrying with dialogue LOTE:", dialogueLote);
+          const loteResult = await googleTranslate(inputText, dialogueLote, "en");
+          return res.json({
+            success: true,
+            data: {
+              originalText: inputText,
+              translatedText: loteResult.translatedText,
+              sourceLang: "en",
+              targetLang: dialogueLote,
+            },
+          });
+        }
+        return res.json({
+          success: true,
+          data: { originalText: inputText, translatedText: inputText, sourceLang: "en", targetLang: "en" },
+        });
+      }
+      const enResult = await googleTranslate(inputText, "en", loteCode);
+      return res.json({
+        success: true,
+        data: {
+          originalText: inputText,
+          translatedText: enResult.translatedText,
+          sourceLang: loteCode,
+          targetLang: "en",
+        },
+      });
+    }
+
+    return res.json({
+      success: true,
+      data: {
+        originalText: inputText,
+        translatedText: result.translatedText,
+        sourceLang: result.detectedSource,
+        targetLang: loteCode,
+      },
+    });
+  } catch (e) {
+    console.error("Translate error:", e.message);
+    return next(e);
+  }
+}
+
+export async function createSegment(req, res, next) {
+  try {
+    // Accept both camelCase and snake_case field names from frontend
+    const dialogueId = req.body.dialogueId ?? req.body.dialogue_id;
+    const textContent = req.body.textContent ?? req.body.text;
+    const segmentOrder = req.body.segmentOrder ?? req.body.segment_order;
+    const translation = req.body.translation;
+    const audioUrl = req.body.audioUrl ?? req.body.audio_url;
+    const suggestedAudioUrl = req.body.suggestedAudioUrl ?? req.body.suggested_audio_url;
+
+    const dialogueIdNum = toInt(dialogueId);
+    const segmentOrderNum = toInt(segmentOrder);
+    console.log(req.body);
+    if (!dialogueIdNum || !textContent || segmentOrderNum === undefined) {
+      return res
+        .status(400)
+        .json({ success: false, message: "Missing fields (need dialogueId/dialogue_id, textContent/text, segmentOrder/segment_order)" });
+    }
+
+    const dialogue = await models.Dialogue.findByPk(dialogueIdNum);
+    if (!dialogue)
+      return res
+        .status(400)
+        .json({ success: false, message: "Invalid dialogueId" });
+
+    // Accept both camelCase and snake_case file field names
+    const audioFile = req.files?.audioUrl?.[0] || req.files?.audio_file?.[0];
+    const suggestedFile = req.files?.suggestedAudioUrl?.[0] || req.files?.suggested_audio_file?.[0];
+
+    console.log(`[createSegment] dialogueId=${dialogueIdNum}, segmentOrder=${segmentOrderNum}, audioFile=${audioFile?.originalname || 'none'}, suggestedFile=${suggestedFile?.originalname || 'none'}`);
+
+    let finalAudioUrl = audioUrl || null;
+    let finalSuggestedAudioUrl = suggestedAudioUrl || null;
+
+    if (audioFile) {
+      try {
+        const up = await uploadAudioToS3({
+          buffer: audioFile.buffer,
+          mimetype: audioFile.mimetype,
+          originalname: audioFile.originalname,
+          keyPrefix: `dialogues/${dialogueIdNum}/segments/audio`,
+        });
+        finalAudioUrl = up.url;
+      } catch (uploadErr) {
+        console.error("[createSegment] audio upload failed:", uploadErr.message);
+        return res.status(502).json({ success: false, message: "Audio file upload failed" });
+      }
+    }
+
+    if (suggestedFile) {
+      try {
+        const up = await uploadAudioToS3({
+          buffer: suggestedFile.buffer,
+          mimetype: suggestedFile.mimetype,
+          originalname: suggestedFile.originalname,
+          keyPrefix: `dialogues/${dialogueIdNum}/segments/suggested`,
+        });
+        finalSuggestedAudioUrl = up.url;
+      } catch (uploadErr) {
+        console.error("[createSegment] suggested audio upload failed:", uploadErr.message);
+        return res.status(502).json({ success: false, message: "Suggested audio file upload failed" });
+      }
+    }
+
+    const segment = await models.Segment.create({
+      dialogueId: dialogueIdNum,
+      textContent,
+      audioUrl: finalAudioUrl,
+      suggestedAudioUrl: finalSuggestedAudioUrl,
+      segmentOrder: segmentOrderNum,
+      translation: translation || null,
+    });
+
+    return res.status(201).json({ success: true, data: { segment } });
+  } catch (e) {
+    console.error("[createSegment] error:", e.message, e.name);
+    if (e.name === "SequelizeValidationError" || e.name === "SequelizeUniqueConstraintError") {
+      return res.status(400).json({ success: false, message: e.errors?.map(x => x.message).join(", ") || e.message });
+    }
+    return next(e);
+  }
+}
+
+export async function listSegments(req, res, next) {
+  try {
+    const where = {};
+    if (req.query.dialogueId) where.dialogueId = Number(req.query.dialogueId);
+
+    const segments = await models.Segment.findAll({
+      where,
+      order: [["segmentOrder", "ASC"]],
+    });
+
+    return res.json({ success: true, data: { segments } });
+  } catch (e) {
+    return next(e);
+  }
+}
+
+export async function getSegment(req, res, next) {
+  try {
+    const segment = await models.Segment.findByPk(req.params.id);
+    if (!segment)
+      return res.status(404).json({ success: false, message: "Not found" });
+    return res.json({ success: true, data: { segment } });
+  } catch (e) {
+    return next(e);
+  }
+}
+
+export async function updateSegment(req, res, next) {
+  try {
+    const segment = await models.Segment.findByPk(req.params.id);
+    if (!segment)
+      return res.status(404).json({ success: false, message: "Not found" });
+
+    // Accept both camelCase and snake_case field names
+    const textContent = req.body.textContent ?? req.body.text;
+    const audioUrl = req.body.audioUrl ?? req.body.audio_url;
+    const suggestedAudioUrl = req.body.suggestedAudioUrl ?? req.body.suggested_audio_url;
+    const segmentOrder = req.body.segmentOrder ?? req.body.segment_order;
+    const translation = req.body.translation;
+
+    const audioFile = req.files?.audioUrl?.[0] || req.files?.audio_file?.[0];
+    const suggestedFile = req.files?.suggestedAudioUrl?.[0] || req.files?.suggested_audio_file?.[0];
+
+    if (textContent !== undefined) segment.textContent = textContent;
+    if (translation !== undefined) segment.translation = translation || null;
+
+    const segmentOrderNum = toInt(segmentOrder);
+    if (segmentOrder !== undefined) {
+      if (segmentOrderNum === undefined)
+        return res
+          .status(400)
+          .json({ success: false, message: "Invalid segmentOrder" });
+      segment.segmentOrder = segmentOrderNum;
+    }
+
+    if (audioFile) {
+      const up = await uploadAudioToS3({
+        buffer: audioFile.buffer,
+        mimetype: audioFile.mimetype,
+        originalname: audioFile.originalname,
+        keyPrefix: `dialogues/${segment.dialogueId}/segments/audio`,
+      });
+      segment.audioUrl = up.url;
+    } else if (audioUrl !== undefined) {
+      segment.audioUrl = audioUrl || null;
+    }
+
+    if (suggestedFile) {
+      const up = await uploadAudioToS3({
+        buffer: suggestedFile.buffer,
+        mimetype: suggestedFile.mimetype,
+        originalname: suggestedFile.originalname,
+        keyPrefix: `dialogues/${segment.dialogueId}/segments/suggested`,
+      });
+      segment.suggestedAudioUrl = up.url;
+    } else if (suggestedAudioUrl !== undefined) {
+      segment.suggestedAudioUrl = suggestedAudioUrl || null;
+    }
+
+    await segment.save();
+    return res.json({ success: true, data: { segment } });
+  } catch (e) {
+    return next(e);
+  }
+}
+
+export async function deleteSegment(req, res, next) {
+  try {
+    const segment = await models.Segment.findByPk(req.params.id);
+    if (!segment)
+      return res.status(404).json({ success: false, message: "Not found" });
+    await segment.destroy();
+    return res.json({ success: true, message: "Deleted" });
+  } catch (e) {
+    return next(e);
+  }
+}
