@@ -11,6 +11,14 @@ const toInt = (v) => {
   return Number.isFinite(n) ? n : undefined;
 };
 
+function planTypeFromPriceId(priceId) {
+  if (!priceId) return null;
+  if (priceId === process.env.STRIPE_MONTHLY_PRICE_ID) return "one";
+  if (priceId === process.env.STRIPE_TWO_MONTHLY_PRICE_ID) return "two";
+  if (priceId === process.env.STRIPE_THREE_MONTHLY_PRICE_ID) return "three";
+  return null;
+}
+
 const daysLeft = (end) => {
   if (!end) return null;
   const now = new Date();
@@ -40,6 +48,7 @@ const getActiveSubscriptions = async (userId) => {
       "cancelAtPeriodEnd",
       "stripeSubscriptionId",
       "stripePriceId",
+      "planType",
     ],
     order: [["currentPeriodEnd", "DESC"]],
   });
@@ -53,6 +62,7 @@ const getActiveSubscriptions = async (userId) => {
     cancelAtPeriodEnd: !!s.cancelAtPeriodEnd,
     stripeSubscriptionId: s.stripeSubscriptionId,
     stripePriceId: s.stripePriceId ?? null,
+    planType: s.planType ?? planTypeFromPriceId(s.stripePriceId) ?? null,
   }));
 };
 

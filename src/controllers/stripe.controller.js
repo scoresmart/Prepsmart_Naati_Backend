@@ -1,9 +1,11 @@
 import Stripe from "stripe";
 import dotenv from "dotenv";
+import { Op } from "sequelize";
 import { sequelize } from "../config/db.js";
 import { User } from "../models/user.model.js";
 import { Subscription } from "../models/subscription.model.js";
 import { Transaction } from "../models/transaction.model.js";
+import { sendPaymentConfirmationEmail } from "../utils/email.js";
 
 dotenv.config();
 
@@ -22,6 +24,27 @@ function priceIdFromType(type) {
   if (type === "two") return process.env.STRIPE_TWO_MONTHLY_PRICE_ID;
   if (type === "three") return process.env.STRIPE_THREE_MONTHLY_PRICE_ID;
   return null;
+}
+
+function planTypeFromPriceId(priceId) {
+  if (!priceId) return null;
+  if (priceId === process.env.STRIPE_MONTHLY_PRICE_ID) return "one";
+  if (priceId === process.env.STRIPE_TWO_MONTHLY_PRICE_ID) return "two";
+  if (priceId === process.env.STRIPE_THREE_MONTHLY_PRICE_ID) return "three";
+  return null;
+}
+
+async function findActiveSubForUser(userId, languageId) {
+  const where = {
+    userId,
+    status: { [Op.in]: ["active", "trialing", "past_due"] },
+    [Op.or]: [
+      { currentPeriodEnd: { [Op.is]: null } },
+      { currentPeriodEnd: { [Op.gte]: new Date() } },
+    ],
+  };
+  if (languageId) where.languageId = languageId;
+  return Subscription.findOne({ where, order: [["currentPeriodEnd", "DESC"]] });
 }
 
 function unixToDate(sec) {
@@ -172,6 +195,11 @@ async function handleInvoiceCreateTransaction({ invoiceId, txStatus }) {
     const stripePriceIdFromSub = getPriceIdFromSub(sub);
     const stripePriceIdFromInv = getPriceIdFromInvoice(inv);
 
+    const planType =
+      sub.metadata?.planType ||
+      planTypeFromPriceId(stripePriceIdFromSub || stripePriceIdFromInv) ||
+      undefined;
+
     await upsertSubscriptionRow(
       {
         userId,
@@ -181,6 +209,7 @@ async function handleInvoiceCreateTransaction({ invoiceId, txStatus }) {
         cancelAtPeriodEnd: sub.cancel_at_period_end,
         currentPeriodEnd,
         stripePriceId: stripePriceIdFromSub || stripePriceIdFromInv,
+        planType,
       },
       t
     );
@@ -194,7 +223,7 @@ async function handleInvoiceCreateTransaction({ invoiceId, txStatus }) {
         stripePriceId: stripePriceIdFromInv || stripePriceIdFromSub,
         amount:
           txStatus === "paid" ? inv.amount_paid || 0 : inv.amount_due || 0,
-        currency: inv.currency || "usd",
+        currency: inv.currency || "aud",
         status: txStatus,
         paidAt:
           txStatus === "paid"
@@ -213,6 +242,14 @@ export async function createCheckoutSession(req, res) {
     const priceId = priceIdFromType(type);
     if (!priceId) return res.status(400).json({ error: "Invalid type" });
     if (!userId) return res.status(400).json({ error: "userId required" });
+
+    const existingSub = await findActiveSubForUser(toInt(userId), languageId ? toInt(languageId) : null);
+    if (existingSub) {
+      return res.status(409).json({
+        error: "User already has an active subscription. Use the upgrade endpoint to change plans.",
+        upgradeEndpoint: "POST /api/v1/stripe/subscriptions/upgrade",
+      });
+    }
 
     const session = await stripe.checkout.sessions.create({
       mode: "subscription",
@@ -338,7 +375,7 @@ export async function verifyCheckoutSession(req, res) {
               stripeSubscriptionId: subscription.id,
               stripePriceId: invoicePriceId || stripePriceId,
               amount: inv.amount_paid || 0,
-              currency: inv.currency || "usd",
+              currency: inv.currency || "aud",
               status: "paid",
               paidAt: unixToDate(inv.status_transitions?.paid_at),
             },
@@ -430,6 +467,21 @@ export async function stripeWebhook(req, res) {
         );
       });
 
+      // Send payment confirmation email
+      try {
+        const sessionUserId = await resolveUserIdFromAny({ session, stripeSub: sub, stripeCustomerId, t: null });
+        if (sessionUserId) {
+          const user = await User.findByPk(sessionUserId, { attributes: ["email", "name"] });
+          if (user?.email) {
+            const confirmedPlanType = session.metadata?.planType || sub.metadata?.planType || null;
+            const confirmedPeriodEnd = getCurrentPeriodEndFromSub(sub);
+            await sendPaymentConfirmationEmail(user.email, user.name || "there", confirmedPlanType, confirmedPeriodEnd);
+          }
+        }
+      } catch (emailErr) {
+        console.error("[Stripe webhook] payment confirmation email failed:", emailErr.message);
+      }
+
       const latestInvoiceObj =
         typeof sub.latest_invoice === "string"
           ? await stripe.invoices.retrieve(sub.latest_invoice, {
@@ -460,7 +512,7 @@ export async function stripeWebhook(req, res) {
                 getPriceIdFromInvoice(latestInvoiceObj) ||
                 getPriceIdFromSub(sub),
               amount: latestInvoiceObj.amount_paid || 0,
-              currency: latestInvoiceObj.currency || "usd",
+              currency: latestInvoiceObj.currency || "aud",
               status: "paid",
               paidAt: unixToDate(latestInvoiceObj.status_transitions?.paid_at),
             },
@@ -493,6 +545,10 @@ export async function stripeWebhook(req, res) {
 
         const currentPeriodEnd = getCurrentPeriodEndFromSub(sub);
         const stripePriceId = getPriceIdFromSub(sub);
+        const planType =
+          sub.metadata?.planType ||
+          planTypeFromPriceId(stripePriceId) ||
+          undefined;
 
         await upsertSubscriptionRow(
           {
@@ -503,6 +559,7 @@ export async function stripeWebhook(req, res) {
             cancelAtPeriodEnd: sub.cancel_at_period_end,
             currentPeriodEnd,
             stripePriceId,
+            planType,
           },
           t
         );
@@ -529,6 +586,56 @@ export async function stripeWebhook(req, res) {
     return res.status(200).json({ received: true });
   } catch (err) {
     return res.status(400).send(`Webhook Error: ${err.message}`);
+  }
+}
+
+export async function resumeUserSubscription(req, res) {
+  try {
+    const userId = toInt(req.body.userId ?? req.query.userId);
+    const subParam = req.params.subscriptionId
+      ? String(req.params.subscriptionId)
+      : null;
+
+    if (!userId) return res.status(400).json({ error: "userId required" });
+    if (!subParam) return res.status(400).json({ error: "subscriptionId required" });
+
+    let row = null;
+    if (subParam.startsWith("sub_")) {
+      row = await Subscription.findOne({ where: { userId, stripeSubscriptionId: subParam } });
+    } else {
+      const dbId = toInt(subParam);
+      if (!dbId) return res.status(400).json({ error: "Invalid subscriptionId" });
+      row = await Subscription.findByPk(dbId);
+      if (row && Number(row.userId) !== Number(userId)) row = null;
+    }
+
+    if (!row) return res.status(404).json({ error: "Subscription not found" });
+    if (!row.cancelAtPeriodEnd)
+      return res.status(400).json({ error: "Subscription is not scheduled for cancellation" });
+
+    const stripeSub = await stripe.subscriptions.update(row.stripeSubscriptionId, {
+      cancel_at_period_end: false,
+    });
+
+    await row.update({
+      cancelAtPeriodEnd: false,
+      status: stripeSub.status,
+      currentPeriodEnd: getCurrentPeriodEndFromSub(stripeSub),
+    });
+
+    return res.json({
+      success: true,
+      data: {
+        id: row.id,
+        userId: row.userId,
+        stripeSubscriptionId: row.stripeSubscriptionId,
+        status: row.status,
+        cancelAtPeriodEnd: row.cancelAtPeriodEnd,
+        currentPeriodEnd: row.currentPeriodEnd,
+      },
+    });
+  } catch (err) {
+    return res.status(err.status || 500).json({ error: err.message });
   }
 }
 
@@ -604,5 +711,111 @@ export async function cancelUserSubscription(req, res) {
     });
   } catch (err) {
     return res.status(400).json({ error: err.message });
+  }
+}
+
+async function getUpgradeContext(userId, targetType, languageId) {
+  const targetPriceId = priceIdFromType(targetType);
+  if (!targetPriceId) throw Object.assign(new Error("Invalid targetType"), { status: 400 });
+
+  const dbSub = await findActiveSubForUser(userId, languageId || null);
+  if (!dbSub) throw Object.assign(new Error("No active subscription found"), { status: 400 });
+  const effectivePlanType = dbSub.planType ?? planTypeFromPriceId(dbSub.stripePriceId);
+  if (effectivePlanType === targetType) throw Object.assign(new Error("Already on this plan"), { status: 409 });
+  if (dbSub.cancelAtPeriodEnd) {
+    throw Object.assign(
+      new Error("Subscription is set to cancel at period end. Reactivate it before upgrading."),
+      { status: 400 }
+    );
+  }
+
+  const stripeSub = await stripe.subscriptions.retrieve(dbSub.stripeSubscriptionId, {
+    expand: ["items.data.price"],
+  });
+
+  const currentItem = stripeSub.items.data[0];
+  if (!currentItem) throw Object.assign(new Error("Stripe subscription has no items"), { status: 400 });
+
+  const targetPrice = await stripe.prices.retrieve(targetPriceId);
+  const currentPrice = currentItem.price;
+
+  if (currentPrice.currency !== targetPrice.currency) {
+    throw Object.assign(
+      new Error(`Currency mismatch: current plan is ${currentPrice.currency.toUpperCase()}, target is ${targetPrice.currency.toUpperCase()}`),
+      { status: 400 }
+    );
+  }
+  if (currentPrice.recurring?.interval !== targetPrice.recurring?.interval) {
+    throw Object.assign(
+      new Error(`Billing interval mismatch: current plan is ${currentPrice.recurring?.interval}, target is ${targetPrice.recurring?.interval}`),
+      { status: 400 }
+    );
+  }
+
+  return { dbSub, stripeSub, currentItem, targetPriceId, targetPrice };
+}
+
+export async function previewUpgrade(req, res) {
+  try {
+    const userId = toInt(req.body.userId);
+    const { targetType } = req.body;
+    if (!userId) return res.status(400).json({ error: "userId required" });
+    if (!targetType) return res.status(400).json({ error: "targetType required" });
+
+    const { dbSub, targetPrice } = await getUpgradeContext(userId, targetType, null);
+
+    return res.json({
+      valid: true,
+      newPlanType: targetType,
+      newPlanPrice: targetPrice.unit_amount,
+      newPlanCurrency: targetPrice.currency,
+      currentPeriodEnd: dbSub.currentPeriodEnd,
+    });
+  } catch (err) {
+    return res.status(err.status || 400).json({ error: err.message });
+  }
+}
+
+export async function applyUpgrade(req, res) {
+  try {
+    const userId = toInt(req.body.userId);
+    const { targetType, languageId } = req.body;
+    if (!userId) return res.status(400).json({ error: "userId required" });
+    if (!targetType) return res.status(400).json({ error: "targetType required" });
+
+    const { dbSub, stripeSub, currentItem, targetPriceId } = await getUpgradeContext(
+      userId,
+      targetType,
+      null  // subscriptions have languageId=null; don't filter by it
+    );
+
+    const updatedSub = await stripe.subscriptions.update(stripeSub.id, {
+      items: [{ id: currentItem.id, price: targetPriceId }],
+      proration_behavior: "none",
+      metadata: { planType: targetType },
+    });
+
+    // Eagerly update the DB row so the UI reflects the change before the webhook fires.
+    await dbSub.update({
+      stripePriceId: targetPriceId,
+      planType: targetType,
+      status: updatedSub.status,
+      currentPeriodEnd: getCurrentPeriodEndFromSub(updatedSub),
+      cancelAtPeriodEnd: !!updatedSub.cancel_at_period_end,
+    });
+
+    return res.json({
+      success: true,
+      subscription: {
+        id: dbSub.id,
+        stripeSubscriptionId: updatedSub.id,
+        planType: targetType,
+        status: updatedSub.status,
+        currentPeriodEnd: getCurrentPeriodEndFromSub(updatedSub),
+        cancelAtPeriodEnd: !!updatedSub.cancel_at_period_end,
+      },
+    });
+  } catch (err) {
+    return res.status(err.status || 400).json({ error: err.message });
   }
 }

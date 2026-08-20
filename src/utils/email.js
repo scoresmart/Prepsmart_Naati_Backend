@@ -160,4 +160,67 @@ export const sendOtpEmail = async (to, otp, purpose = "verify") => {
   return sendEmailFunc(to, `${title} – PrepSmart`, html);
 };
 
+const PLAN_LABELS = {
+  one:   { name: "1 Month",                        price: "AUD $25.00" },
+  two:   { name: "2 Months",                       price: "AUD $40.00" },
+  three: { name: "2 Months + 2 One-on-One Sessions", price: "AUD $99.00" },
+};
+
+export const sendPaymentConfirmationEmail = async (to, userName, planType, periodEnd) => {
+  const plan = PLAN_LABELS[planType] || { name: planType, price: "" };
+  const periodEndStr = periodEnd
+    ? new Date(periodEnd).toLocaleDateString("en-AU", { day: "numeric", month: "long", year: "numeric" })
+    : "N/A";
+
+  const html = `
+<div style="font-family:'Segoe UI',Arial,Helvetica,sans-serif; background:#0a0f1a; padding:32px 16px;">
+  <div style="max-width:560px; margin:0 auto; background:linear-gradient(145deg,#111827,#1a2332); border-radius:16px; padding:36px 32px; border:1px solid #1f2937;">
+
+    <div style="text-align:center; margin-bottom:28px;">
+      <h1 style="margin:0; font-size:28px; font-weight:800; color:#10b981; letter-spacing:-0.5px;">PrepSmart</h1>
+      <p style="margin:4px 0 0; font-size:12px; color:#6b7280; text-transform:uppercase; letter-spacing:2px;">NAATI CCL Preparation</p>
+    </div>
+
+    <div style="height:1px; background:linear-gradient(90deg,transparent,#1f2937,transparent); margin:0 0 28px;"></div>
+
+    <h2 style="margin:0 0 8px; font-size:22px; color:#f9fafb; font-weight:700;">Payment confirmed! 🎉</h2>
+    <p style="margin:0 0 24px; font-size:15px; color:#9ca3af; line-height:1.7;">
+      Hi ${userName}, your subscription is now active. Here's a summary of your purchase:
+    </p>
+
+    <div style="background:#0d1117; border-radius:12px; padding:20px 24px; margin:0 0 24px; border:1px solid #1f2937;">
+      <table cellpadding="0" cellspacing="0" border="0" style="width:100%;">
+        <tr>
+          <td style="padding:8px 0; font-size:14px; color:#6b7280;">Plan</td>
+          <td style="padding:8px 0; font-size:14px; color:#f9fafb; text-align:right; font-weight:600;">${plan.name}</td>
+        </tr>
+        <tr>
+          <td style="padding:8px 0; font-size:14px; color:#6b7280; border-top:1px solid #1f2937;">Amount paid</td>
+          <td style="padding:8px 0; font-size:14px; color:#10b981; text-align:right; font-weight:700; border-top:1px solid #1f2937;">${plan.price}</td>
+        </tr>
+        <tr>
+          <td style="padding:8px 0; font-size:14px; color:#6b7280; border-top:1px solid #1f2937;">Access until</td>
+          <td style="padding:8px 0; font-size:14px; color:#f9fafb; text-align:right; border-top:1px solid #1f2937;">${periodEndStr}</td>
+        </tr>
+      </table>
+    </div>
+
+    <div style="text-align:center; margin:0 0 24px;">
+      <a href="https://naati.prepsmart.au" style="display:inline-block; padding:14px 40px; background:linear-gradient(135deg,#10b981,#059669); color:#ffffff; font-size:15px; font-weight:700; text-decoration:none; border-radius:10px; letter-spacing:0.3px;">
+        Start Practicing →
+      </a>
+    </div>
+
+    <div style="height:1px; background:linear-gradient(90deg,transparent,#1f2937,transparent); margin:0 0 20px;"></div>
+
+    <p style="margin:0; font-size:12px; color:#4b5563; text-align:center; line-height:1.6;">
+      Need help? Reply to this email or visit our support page.<br/>
+      © ${new Date().getFullYear()} PrepSmart. All rights reserved.
+    </p>
+  </div>
+</div>
+`;
+  return sendEmailFunc(to, "Your PrepSmart subscription is active 🎓", html);
+};
+
 export default sendEmailFunc;

@@ -104,11 +104,7 @@ export const createVocabulary = async (req, res, next) => {
 export const getVocabularies = async (req, res, next) => {
   try {
     const page = Math.max(parseInt(req.query.page || "1", 10), 1);
-    const limit = Math.min(
-      Math.max(parseInt(req.query.limit || "10", 10), 1),
-      1000
-    );
-    const offset = (page - 1) * limit;
+    const requestedLimit = Math.max(parseInt(req.query.limit || "10", 10), 1);
 
     const userId = toInt(pick(req.query, "userId", "user_id"));
     const languageId = toInt(
@@ -158,6 +154,9 @@ export const getVocabularies = async (req, res, next) => {
         }
       }
     }
+
+    const limit = Math.min(requestedLimit, isSubscribed ? 10000 : 1000);
+    const offset = (page - 1) * limit;
 
     const { rows, count } = await Vocabulary.findAndCountAll({
       where,

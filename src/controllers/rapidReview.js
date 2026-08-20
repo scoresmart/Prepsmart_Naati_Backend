@@ -38,6 +38,10 @@ function safeDialogue(d) {
     id: plain.id,
     title: plain.title,
     description: plain.description,
+    difficulty: plain.difficulty,
+    duration: plain.duration,
+    domainId: plain.domainId,
+    languageId: plain.languageId,
   };
 }
 
@@ -45,7 +49,7 @@ const fetchSegmentsByIds = async (ids) => {
   const clean = Array.from(new Set(ids.map(toInt).filter(Boolean)));
   if (!clean.length) return [];
   const rows = await Segment.findAll({ where: { id: { [Op.in]: clean } } });
-  const map = new Map(rows.map((s) => [s.id, s.get({ plain: true })]));
+  const map = new Map(rows.map((s) => [toInt(s.id), s.get({ plain: true })]));
   return clean.map((id) => map.get(id)).filter(Boolean);
 };
 
@@ -385,6 +389,24 @@ export async function getRapidReviewAttemptsByUser(req, res, next) {
         .status(400)
         .json({ success: false, message: "userId is required" });
 
+    const rapidReviewIdFilter = toInt(req.query.rapidReviewId);
+
+    // If rapidReviewId is provided, return ALL attempts (every repeat) for that rapid review
+    if (rapidReviewIdFilter) {
+      const allAttempts = await RapidReviewAttempt.findAll({
+        where: { userId, rapidReviewId: rapidReviewIdFilter },
+        order: [["id", "DESC"]],
+      });
+
+      return res.json({
+        success: true,
+        data: {
+          attempts: allAttempts.map((a) => a.get({ plain: true })),
+        },
+      });
+    }
+
+    // Otherwise return the grouped progress view (legacy behavior)
     const attempts = await RapidReviewAttempt.findAll({
       where: { userId },
       attributes: ["rapidReviewId", "segmentId", "createdAt"],
@@ -531,7 +553,7 @@ export async function getSegmentsByLanguage(req, res, next) {
       });
     }
 
-    const dialogueIds = dialogues.map((d) => d.id);
+    const dialogueIds = dialogues.map((d) => toInt(d.id));
 
     const segments = await Segment.findAll({
       where: { dialogueId: { [Op.in]: dialogueIds } },
@@ -544,14 +566,14 @@ export async function getSegmentsByLanguage(req, res, next) {
 
     const segMap = new Map();
     for (const s of segments) {
-      const did = s.dialogueId;
+      const did = toInt(s.dialogueId);
       if (!segMap.has(did)) segMap.set(did, []);
       segMap.get(did).push(s.get({ plain: true }));
     }
 
     const result = dialogues.map((d) => ({
       ...safeDialogue(d),
-      segments: segMap.get(d.id) || [],
+      segments: segMap.get(toInt(d.id)) || [],
     }));
 
     return res.json({

@@ -8,8 +8,8 @@ import { sequelize } from "../config/db.js";
 const { ExamAttempt, Dialogue, Segment, SegmentAttempt } = models;
 
 const ensureOwnerOrAdmin = (req, ownerId) => {
-  if (req.user?.role === "admin") return;
-  if (!req.user?.id || req.user.id !== ownerId) {
+  if (req.auth?.role === "admin") return;
+  if (!req.auth?.userId || req.auth.userId !== ownerId) {
     const err = new Error("Forbidden");
     err.status = 403;
     throw err;
@@ -36,17 +36,18 @@ export const listUserExams = async (req, res, next) => {
   try {
     const where = {};
 
-    if (req.user?.role === "admin") {
+    if (req.auth?.role === "admin") {
       const userIdNum = toInt(req.query.userId);
       if (userIdNum) where.userId = userIdNum;
     } else {
-      where.userId = req.user.id;
+      where.userId = req.auth.userId;
     }
 
     const dialogueIdNum = toInt(req.query.dialogueId);
     if (dialogueIdNum) where.dialogueId = dialogueIdNum;
 
     if (req.query.status) where.status = req.query.status;
+    if (req.query.examType) where.examType = req.query.examType;
 
     const attempts = await ExamAttempt.findAll({
       where,

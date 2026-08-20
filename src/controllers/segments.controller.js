@@ -72,17 +72,43 @@ async function getDialogueLoteCode(dialogueId) {
 /* ─── Translate endpoint ─── */
 export async function translateSegment(req, res, next) {
   try {
-    const { text, targetLanguage, sourceLanguage, segmentId, dialogueId } = req.body;
-    console.log("[translate] params:", { text: text?.substring(0, 60), targetLanguage, sourceLanguage, segmentId, dialogueId });
+    const { text, targetLanguage, sourceLanguage, segmentId, dialogueId, forceRefresh } = req.body;
+    console.log("[translate] params:", { text: text?.substring(0, 60), targetLanguage, sourceLanguage, segmentId, dialogueId, forceRefresh });
 
     // Resolve the text to translate — either explicit or from a segment
     let inputText = text;
-    if (!inputText && segmentId) {
-      const seg = await models.Segment.findByPk(segmentId);
-      if (!seg) return res.status(404).json({ success: false, message: "Segment not found" });
-      inputText = seg.textContent;
+    let segmentRecord = null;
+    if (segmentId) {
+      segmentRecord = await models.Segment.findByPk(segmentId);
+      if (!segmentRecord) return res.status(404).json({ success: false, message: "Segment not found" });
+      if (!inputText) inputText = segmentRecord.textContent;
+
+      // ── Cache hit: if the segment already has a saved translation, return it ──
+      if (!forceRefresh && segmentRecord.translation) {
+        console.log("[translate] cache HIT for segment", segmentId);
+        return res.json({
+          success: true,
+          cached: true,
+          data: {
+            originalText: inputText,
+            translatedText: segmentRecord.translation,
+            sourceLang: sourceLanguage || "auto",
+            targetLang: targetLanguage || "auto",
+          },
+        });
+      }
     }
     if (!inputText) return res.status(400).json({ success: false, message: "text or segmentId is required" });
+
+    // Helper: save translation to DB and respond
+    const sendAndCache = (data) => {
+      if (segmentRecord && data.translatedText && data.translatedText !== inputText) {
+        segmentRecord.translation = data.translatedText;
+        segmentRecord.save().catch(err => console.error("[translate] cache save failed:", err.message));
+        console.log("[translate] cached translation for segment", segmentId);
+      }
+      return res.json({ success: true, cached: false, data });
+    };
 
     // Resolve LOTE language — from param, or from dialogueId → Language.langCode
     let loteCode = toLangCode(targetLanguage);
@@ -105,10 +131,7 @@ export async function translateSegment(req, res, next) {
         console.log("[translate] swapped target to dialogue LOTE:", loteCode);
       } else if (sourceBase === "en") {
         // English text, English target → no meaningful translation possible
-        return res.json({
-          success: true,
-          data: { originalText: inputText, translatedText: inputText, sourceLang: "en", targetLang: "en" },
-        });
+        return sendAndCache({ originalText: inputText, translatedText: inputText, sourceLang: "en", targetLang: "en" });
       } else {
         // LOTE text, LOTE target → translate to English
         loteCode = "en";
@@ -129,35 +152,26 @@ export async function translateSegment(req, res, next) {
         // Try using dialogue LOTE if available and different
         if (dialogueLote && dialogueLote.split("-")[0].toLowerCase() !== loteCode.split("-")[0].toLowerCase()) {
           result = await googleTranslate(inputText, dialogueLote, null);
-          return res.json({
-            success: true,
-            data: {
-              originalText: inputText,
-              translatedText: result.translatedText,
-              sourceLang: result.detectedSource,
-              targetLang: dialogueLote,
-            },
+          return sendAndCache({
+            originalText: inputText,
+            translatedText: result.translatedText,
+            sourceLang: result.detectedSource,
+            targetLang: dialogueLote,
           });
         }
         // Try flipping: if target was LOTE, try English; if English, try dialogue LOTE
         const flipTarget = loteCode.split("-")[0].toLowerCase() === "en" ? (dialogueLote || "pa") : "en";
         try {
           result = await googleTranslate(inputText, flipTarget, null);
-          return res.json({
-            success: true,
-            data: {
-              originalText: inputText,
-              translatedText: result.translatedText,
-              sourceLang: result.detectedSource,
-              targetLang: flipTarget,
-            },
+          return sendAndCache({
+            originalText: inputText,
+            translatedText: result.translatedText,
+            sourceLang: result.detectedSource,
+            targetLang: flipTarget,
           });
         } catch (_) {
           // Ultimate fallback: return original text
-          return res.json({
-            success: true,
-            data: { originalText: inputText, translatedText: inputText, sourceLang: loteCode, targetLang: loteCode },
-          });
+          return sendAndCache({ originalText: inputText, translatedText: inputText, sourceLang: loteCode, targetLang: loteCode });
         }
       }
       throw err;
@@ -175,41 +189,29 @@ export async function translateSegment(req, res, next) {
         if (dialogueLote && dialogueLote.split("-")[0].toLowerCase() !== "en") {
           console.log("[translate] en→en detected, retrying with dialogue LOTE:", dialogueLote);
           const loteResult = await googleTranslate(inputText, dialogueLote, "en");
-          return res.json({
-            success: true,
-            data: {
-              originalText: inputText,
-              translatedText: loteResult.translatedText,
-              sourceLang: "en",
-              targetLang: dialogueLote,
-            },
+          return sendAndCache({
+            originalText: inputText,
+            translatedText: loteResult.translatedText,
+            sourceLang: "en",
+            targetLang: dialogueLote,
           });
         }
-        return res.json({
-          success: true,
-          data: { originalText: inputText, translatedText: inputText, sourceLang: "en", targetLang: "en" },
-        });
+        return sendAndCache({ originalText: inputText, translatedText: inputText, sourceLang: "en", targetLang: "en" });
       }
       const enResult = await googleTranslate(inputText, "en", loteCode);
-      return res.json({
-        success: true,
-        data: {
-          originalText: inputText,
-          translatedText: enResult.translatedText,
-          sourceLang: loteCode,
-          targetLang: "en",
-        },
+      return sendAndCache({
+        originalText: inputText,
+        translatedText: enResult.translatedText,
+        sourceLang: loteCode,
+        targetLang: "en",
       });
     }
 
-    return res.json({
-      success: true,
-      data: {
-        originalText: inputText,
-        translatedText: result.translatedText,
-        sourceLang: result.detectedSource,
-        targetLang: loteCode,
-      },
+    return sendAndCache({
+      originalText: inputText,
+      translatedText: result.translatedText,
+      sourceLang: result.detectedSource,
+      targetLang: loteCode,
     });
   } catch (e) {
     console.error("Translate error:", e.message);

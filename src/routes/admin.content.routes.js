@@ -5,6 +5,7 @@ import { createDomain, listDomains, getDomain, updateDomain, deleteDomain } from
 import { createDialogue, listDialogues, getDialogue, updateDialogue, deleteDialogue } from "../controllers/dialogues.controller.js";
 import { createSegment, listSegments, getSegment, updateSegment, deleteSegment, translateSegment } from "../controllers/segments.controller.js";
 import { getDashboardCounts } from "../controllers/adminDashboard.controller.js";
+import { getPracticeLogs, getPracticeLogDetail, getPracticeLogStats } from "../controllers/practiceLogs.controller.js";
 import multer from "multer";
 const upload = multer({
     storage: multer.memoryStorage()
@@ -36,7 +37,10 @@ adminContentRouter.delete("/dialogues/:id", deleteDialogue);
 // adminContentRouter.post("/segments", createSegment);
 adminContentRouter.get("/segments", listSegments);
 adminContentRouter.get("/segments/:id", getSegment);
-adminContentRouter.put("/segments/:id", updateSegment);
+adminContentRouter.put("/segments/:id", upload.fields([
+  { name: "audioUrl", maxCount: 1 },
+  { name: "suggestedAudioUrl", maxCount: 1 }
+]), updateSegment);
 adminContentRouter.delete("/segments/:id", deleteSegment);
 adminContentRouter.post("/segments/translate", translateSegment);
 
@@ -48,3 +52,8 @@ adminContentRouter.post(
     ]),
     createSegment
   );
+
+// Practice Logs
+adminContentRouter.get("/practice-logs/stats", getPracticeLogStats);
+adminContentRouter.get("/practice-logs", getPracticeLogs);
+adminContentRouter.get("/practice-logs/:id", getPracticeLogDetail);
