@@ -11,6 +11,10 @@ import { Dialogue } from "../models/dialogue.model.js";
 import { Segment } from "../models/segment.model.js";
 
 import { uploadAudioToS3 } from "../utils/aws.js";
+import {
+  isElevenLabsSttEnabled,
+  transcribeWithElevenLabs,
+} from "../utils/elevenlabs.js";
 import MockTestFinalResult from "../models/mockTestFinalResult.model.js";
 
 const toInt = (v) => {
@@ -178,7 +182,21 @@ const toAzureLocale = (lang) => {
   return map[code] || null;
 };
 
-const transcribeWithOpenAI = async ({ buffer, mimetype, language }) => {
+/**
+ * Single transcription seam. Routes to ElevenLabs Scribe when
+ * STT_PROVIDER=elevenlabs, otherwise to Azure fast transcription.
+ * Returns the transcript text either way.
+ */
+const transcribeAudio = async ({ buffer, mimetype, language }) => {
+  if (isElevenLabsSttEnabled()) {
+    const { text } = await transcribeWithElevenLabs({
+      buffer,
+      mimetype,
+      language,
+    });
+    return text;
+  }
+
   const key = process.env.AZURE_SPEECH_KEY;
   if (!key) throw new Error("AZURE_SPEECH_KEY is required");
   const region = process.env.AZURE_SPEECH_REGION;
@@ -830,20 +848,20 @@ export const submitMockTestSegment = async (req, res, next) => {
       : null;
 
     const referenceTranscript = refAudio
-      ? await transcribeWithOpenAI({
+      ? await transcribeAudio({
           buffer: refAudio.buffer,
           mimetype: refAudio.mimetype,
           language,
         })
       : "";
     const suggestedTranscript = sugAudio
-      ? await transcribeWithOpenAI({
+      ? await transcribeAudio({
           buffer: sugAudio.buffer,
           mimetype: sugAudio.mimetype,
           language,
         })
       : "";
-    const studentTranscript = await transcribeWithOpenAI({
+    const studentTranscript = await transcribeAudio({
       buffer: file.buffer,
       mimetype: file.mimetype,
       language,

@@ -2,6 +2,11 @@ import path from "node:path";
 import { models } from "../models/index.js";
 import { uploadAudioToS3 } from "../utils/aws.js";
 import { denoiseAudio } from "../utils/audioDenoise.js";
+import {
+  isElevenLabsConfigured,
+  isElevenLabsSttEnabled,
+  transcribeWithElevenLabs,
+} from "../utils/elevenlabs.js";
 
 const { Segment, Dialogue, SegmentAttempt } = models;
 
@@ -856,15 +861,40 @@ const azureSentiment = async ({ text, language }) => {
   return null;
 };
 
-const transcribeWithAzure = async ({
+/**
+ * Single transcription seam. Routes to ElevenLabs Scribe when
+ * STT_PROVIDER=elevenlabs, otherwise to Azure fast transcription.
+ * Both providers return the same { text, insights } shape.
+ */
+const transcribeAudio = async ({
   buffer,
   mimetype,
   audioUrl,
   language,
   locales,
 }) => {
+  if (isElevenLabsSttEnabled()) {
+    return transcribeWithElevenLabs({
+      buffer,
+      mimetype,
+      audioUrl,
+      // A single locale pins the language; several mean "let Scribe detect".
+      language: language || (locales?.length === 1 ? locales[0] : null),
+    });
+  }
   return azureFastTranscribe({ buffer, mimetype, audioUrl, language, locales });
 };
+
+/**
+ * Whether Scribe joins the student-audio engine comparison. On whenever a key
+ * is present; set ELEVENLABS_STT_COMPARE=false to keep it out of the fan-out
+ * (it is still used when STT_PROVIDER=elevenlabs).
+ */
+const runElevenLabsStt = () =>
+  isElevenLabsConfigured() &&
+  (isElevenLabsSttEnabled() ||
+    String(process.env.ELEVENLABS_STT_COMPARE || "true").toLowerCase() !==
+      "false");
 
 /* ─── Whisper fallback for languages Azure STT does not support ─── */
 const WHISPER_SUPPORTED_LANGS = new Set([
@@ -970,6 +1000,35 @@ const googleTranslate = async (text, targetLang, sourceLang = null) => {
 /* ─── Google Cloud Speech-to-Text (native support for Punjabi and other languages) ─── */
 const GOOGLE_STT_LOCALE_MAP = {
   pa: "pa-Guru-IN",  // Punjabi (Gurmukhi)
+  hi: "hi-IN",
+  ur: "ur-PK",
+  ne: "ne-NP",
+  bn: "bn-IN",
+  gu: "gu-IN",
+  ta: "ta-IN",
+  te: "te-IN",
+  kn: "kn-IN",
+  ml: "ml-IN",
+  mr: "mr-IN",
+  zh: "cmn-Hans-CN",
+  ar: "ar-EG",
+  fa: "fa-IR",
+  es: "es-ES",
+  vi: "vi-VN",
+  th: "th-TH",
+  ko: "ko-KR",
+  ja: "ja-JP",
+  tl: "fil-PH",
+  id: "id-ID",
+  ms: "ms-MY",
+  tr: "tr-TR",
+  ru: "ru-RU",
+  pt: "pt-BR",
+  fr: "fr-FR",
+  de: "de-DE",
+  it: "it-IT",
+  pl: "pl-PL",
+  en: "en-AU",
 };
 
 const googleSTT = async ({ buffer, audioUrl, mimetype, language }) => {
@@ -1330,6 +1389,7 @@ export const runAiExam = async (req, res, next) => {
     let azureRef = null;
     let azureSug = null;
     let azureStu = null;
+    let sttTranscripts = null;
 
     // ─── Reference audio transcription ───
     if (referenceAudioUrl) {
@@ -1337,12 +1397,12 @@ export const runAiExam = async (req, res, next) => {
       if (refLocales.length > 0) {
         // Azure supports this locale
         try {
-          azureRef = await transcribeWithAzure({ audioUrl: referenceAudioUrl, locales: bothLocales });
+          azureRef = await transcribeAudio({ audioUrl: referenceAudioUrl, locales: bothLocales });
           referenceTranscript = azureRef?.text ? String(azureRef.text) : "";
         } catch {
           try {
             const refAudio = await fetchAudio(referenceAudioUrl);
-            azureRef = await transcribeWithAzure({ buffer: refAudio.buffer, mimetype: refAudio.mimetype, locales: bothLocales });
+            azureRef = await transcribeAudio({ buffer: refAudio.buffer, mimetype: refAudio.mimetype, locales: bothLocales });
             referenceTranscript = azureRef?.text ? String(azureRef.text) : "";
           } catch (refErr) {
             console.log("[scoring] Azure ref failed twice, Whisper fallback:", refErr.message?.substring(0, 100));
@@ -1372,12 +1432,12 @@ export const runAiExam = async (req, res, next) => {
       const sugLang = isOddSegment ? langCode : "en";
       if (sugLocales.length > 0) {
         try {
-          azureSug = await transcribeWithAzure({ audioUrl: suggestedAudioUrl, locales: bothLocales });
+          azureSug = await transcribeAudio({ audioUrl: suggestedAudioUrl, locales: bothLocales });
           suggestedTranscript = azureSug?.text ? String(azureSug.text) : "";
         } catch {
           try {
             const sugAudio = await fetchAudio(suggestedAudioUrl);
-            azureSug = await transcribeWithAzure({ buffer: sugAudio.buffer, mimetype: sugAudio.mimetype, locales: bothLocales });
+            azureSug = await transcribeAudio({ buffer: sugAudio.buffer, mimetype: sugAudio.mimetype, locales: bothLocales });
             suggestedTranscript = azureSug?.text ? String(azureSug.text) : "";
           } catch (sugErr) {
             console.log("[scoring] Azure sug failed twice, Whisper fallback:", sugErr.message?.substring(0, 100));
@@ -1399,34 +1459,100 @@ export const runAiExam = async (req, res, next) => {
     }
 
     // ─── Student audio transcription ───
-    if (stuLocales.length > 0) {
-      try {
-        azureStu = await transcribeWithAzure({
-          buffer: cleanBuffer,
-          mimetype: cleanMimetype,
-          locales: stuLocales,
-        });
-        studentTranscript = azureStu?.text ? String(azureStu.text) : "";
-      } catch (stuErr) {
-        console.error("[scoring] Azure student error:", stuErr.message?.substring(0, 100));
-      }
-    }
-    // Google Cloud STT fallback (better for Punjabi etc.)
-    if (!studentTranscript) {
-      const stuLang = isOddSegment ? langCode : "en";
-      const gStu = await googleSTT({ buffer: cleanBuffer, mimetype: cleanMimetype, language: stuLang });
-      if (gStu?.text) {
-        studentTranscript = gStu.text;
-        console.log("[scoring] Google STT student:", studentTranscript?.substring(0, 80));
-      }
-    }
-    // Whisper fallback if Azure didn't produce a student transcript
-    if (!studentTranscript) {
-      const stuLang = isOddSegment ? langCode : "en";
-      console.log("[scoring] Using Whisper for student audio (lang:", stuLang, ")");
-      const wStu = await whisperTranscribe({ buffer: cleanBuffer, language: stuLang });
-      studentTranscript = wStu.text;
-    }
+    // Every engine transcribes the SAME audio so the score card can show them
+    // side by side. Run concurrently: wall-clock is the slowest engine, not the
+    // sum of all three. Each engine is isolated — one failing never blocks the
+    // others, and its error is recorded instead of the transcript.
+    const stuLang = isOddSegment ? langCode : "en";
+
+    // Each engine keeps its own slot below, so this fan-out calls Azure
+    // directly rather than through the provider-switching seam - otherwise a
+    // flipped STT_PROVIDER would file ElevenLabs output under "azure".
+    const [azureSettled, googleSettled, whisperSettled, elevenSettled] =
+      await Promise.allSettled([
+        stuLocales.length > 0
+          ? azureFastTranscribe({
+              buffer: cleanBuffer,
+              mimetype: cleanMimetype,
+              locales: stuLocales,
+            })
+          : Promise.resolve(null),
+        googleSTT({ buffer: cleanBuffer, mimetype: cleanMimetype, language: stuLang }),
+        whisperTranscribe({ buffer: cleanBuffer, language: stuLang }),
+        runElevenLabsStt()
+          ? transcribeWithElevenLabs({
+              buffer: cleanBuffer,
+              mimetype: cleanMimetype,
+              language: stuLang,
+            })
+          : Promise.resolve(null),
+      ]);
+
+    const settledText = (r) => {
+      if (r.status !== "fulfilled") return null;
+      const t = r.value?.text;
+      return t ? String(t).trim() || null : null;
+    };
+    const settledError = (r) =>
+      r.status === "rejected"
+        ? String(r.reason?.message || r.reason).substring(0, 200)
+        : null;
+
+    if (azureSettled.status === "fulfilled") azureStu = azureSettled.value;
+    else console.error("[scoring] Azure student error:", settledError(azureSettled));
+    // Confidence insights for the GPT prompt: fall back to Scribe when Azure
+    // produced nothing. Each insights object names its own provider.
+    if (!azureStu && elevenSettled.status === "fulfilled" && elevenSettled.value)
+      azureStu = elevenSettled.value;
+
+    sttTranscripts = {
+      azure: {
+        text: settledText(azureSettled),
+        error: settledError(azureSettled),
+        locales: stuLocales,
+      },
+      google: {
+        text: settledText(googleSettled),
+        error: settledError(googleSettled),
+        locale: GOOGLE_STT_LOCALE_MAP[stuLang] || null,
+      },
+      whisper: {
+        text: settledText(whisperSettled),
+        error: settledError(whisperSettled),
+        model: "whisper-1",
+      },
+      elevenlabs: {
+        text: settledText(elevenSettled),
+        error: settledError(elevenSettled),
+        model: process.env.ELEVENLABS_STT_MODEL || "scribe_v1",
+        detectedLanguage:
+          elevenSettled.status === "fulfilled"
+            ? elevenSettled.value?.insights?.detectedLanguage || null
+            : null,
+      },
+      language: stuLang,
+    };
+
+    // Engine priority. Unchanged by default (Azure → Google → Whisper, with
+    // ElevenLabs as a last resort); STT_PROVIDER=elevenlabs promotes Scribe
+    // to first pick.
+    const enginePriority = isElevenLabsSttEnabled()
+      ? ["elevenlabs", "azure", "google", "whisper"]
+      : ["azure", "google", "whisper", "elevenlabs"];
+    const primaryEngine =
+      enginePriority.find((name) => sttTranscripts[name].text) || null;
+
+    studentTranscript = primaryEngine ? sttTranscripts[primaryEngine].text : "";
+    sttTranscripts.primary = primaryEngine;
+
+    console.log(
+      "[scoring] STT compare — lang:", stuLang,
+      "| azure:", sttTranscripts.azure.text?.length ?? "none",
+      "| google:", sttTranscripts.google.text?.length ?? "none",
+      "| whisper:", sttTranscripts.whisper.text?.length ?? "none",
+      "| elevenlabs:", sttTranscripts.elevenlabs.text?.length ?? "none",
+      "| primary:", sttTranscripts.primary
+    );
 
     // ─── Convert transcripts to correct LOTE script (e.g. Devanagari→Gurmukhi for Punjabi) ───
     const scriptFix = SCRIPT_FIX_MAP[langCode];
@@ -1602,6 +1728,11 @@ export const runAiExam = async (req, res, next) => {
         segmentId,
         audioUrl: userAudioUrl,
         userTranscription: studentTranscript,
+        // `primaryText` is the post-script-fix transcript actually scored; the
+        // per-engine `text` fields stay as each model returned them, raw.
+        sttTranscripts: sttTranscripts
+          ? { ...sttTranscripts, primaryText: studentTranscript || null }
+          : null,
         referenceTranscript: referenceTranscript || null,
         suggestedTranscript: suggestedTranscript || null,
         questionAudioUrl: referenceAudioUrl || null,
@@ -1645,6 +1776,7 @@ export const runAiExam = async (req, res, next) => {
           studentTranscript,
           combinedTranscript,
         },
+        sttTranscripts,
         scores,
         segmentAttempt,
       },

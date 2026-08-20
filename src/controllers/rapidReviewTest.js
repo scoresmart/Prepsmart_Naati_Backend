@@ -1,6 +1,10 @@
 import path from "node:path";
 import { models } from "../models/index.js";
 import { uploadAudioToS3 } from "../utils/aws.js";
+import {
+  isElevenLabsSttEnabled,
+  transcribeWithElevenLabs,
+} from "../utils/elevenlabs.js";
 
 const { Segment, Dialogue, RapidReview, RapidReviewAttempt } = models;
 
@@ -812,13 +816,27 @@ const azureSentiment = async ({ text, language }) => {
   return null;
 };
 
-const transcribeWithAzure = async ({
+/**
+ * Single transcription seam. Routes to ElevenLabs Scribe when
+ * STT_PROVIDER=elevenlabs, otherwise to Azure fast transcription.
+ * Both providers return the same { text, insights } shape.
+ */
+const transcribeAudio = async ({
   buffer,
   mimetype,
   audioUrl,
   language,
   locales,
 }) => {
+  if (isElevenLabsSttEnabled()) {
+    return transcribeWithElevenLabs({
+      buffer,
+      mimetype,
+      audioUrl,
+      // A single locale pins the language; several mean "let Scribe detect".
+      language: language || (locales?.length === 1 ? locales[0] : null),
+    });
+  }
   return azureFastTranscribe({ buffer, mimetype, audioUrl, language, locales });
 };
 
@@ -1313,12 +1331,12 @@ export const runAiRapidReview = async (req, res, next) => {
       const refLang = isOddSegment ? "en" : langCode;
       if (refLocales.length > 0) {
         try {
-          azureRef = await transcribeWithAzure({ audioUrl: referenceAudioUrl, locales: bothLocales });
+          azureRef = await transcribeAudio({ audioUrl: referenceAudioUrl, locales: bothLocales });
           referenceTranscript = azureRef?.text ? String(azureRef.text) : "";
         } catch {
           try {
             const refAudio = await fetchAudio(referenceAudioUrl);
-            azureRef = await transcribeWithAzure({ buffer: refAudio.buffer, mimetype: refAudio.mimetype, locales: bothLocales });
+            azureRef = await transcribeAudio({ buffer: refAudio.buffer, mimetype: refAudio.mimetype, locales: bothLocales });
             referenceTranscript = azureRef?.text ? String(azureRef.text) : "";
           } catch (refErr) {
             console.log("[rapid-scoring] Azure ref failed twice, Whisper fallback:", refErr.message?.substring(0, 100));
@@ -1348,12 +1366,12 @@ export const runAiRapidReview = async (req, res, next) => {
       const sugLang = isOddSegment ? langCode : "en";
       if (sugLocales.length > 0) {
         try {
-          azureSug = await transcribeWithAzure({ audioUrl: suggestedAudioUrl, locales: bothLocales });
+          azureSug = await transcribeAudio({ audioUrl: suggestedAudioUrl, locales: bothLocales });
           suggestedTranscript = azureSug?.text ? String(azureSug.text) : "";
         } catch {
           try {
             const sugAudio = await fetchAudio(suggestedAudioUrl);
-            azureSug = await transcribeWithAzure({ buffer: sugAudio.buffer, mimetype: sugAudio.mimetype, locales: bothLocales });
+            azureSug = await transcribeAudio({ buffer: sugAudio.buffer, mimetype: sugAudio.mimetype, locales: bothLocales });
             suggestedTranscript = azureSug?.text ? String(azureSug.text) : "";
           } catch (sugErr) {
             console.log("[rapid-scoring] Azure sug failed twice, Whisper fallback:", sugErr.message?.substring(0, 100));
@@ -1378,7 +1396,7 @@ export const runAiRapidReview = async (req, res, next) => {
     stage = "transcribe_student_audio";
     if (stuLocales.length > 0) {
       try {
-        azureStu = await transcribeWithAzure({
+        azureStu = await transcribeAudio({
           buffer: file.buffer,
           mimetype: file.mimetype,
           locales: stuLocales,

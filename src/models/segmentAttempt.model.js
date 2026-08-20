@@ -36,6 +36,16 @@ const SegmentAttempt = sequelize.define(
       field: "user_transcription",
     },
 
+    // Per-engine transcripts of the SAME user audio, kept side by side so the
+    // score card can compare them. Shape:
+    //   { azure: {text, error}, google: {...}, whisper: {...}, primary: "azure" }
+    // `userTranscription` stays the single primary transcript used for scoring.
+    sttTranscripts: {
+      type: DataTypes.JSON,
+      allowNull: true,
+      field: "stt_transcripts",
+    },
+
     aiScores: { type: DataTypes.JSON, allowNull: true, field: "ai_scores" },
 
     accuracyScore: {
