@@ -30,7 +30,7 @@ export const isElevenLabsConfigured = () => !!getElevenLabsKey();
 
 /** True when the scoring flows should route transcription to Scribe. */
 export const isElevenLabsSttEnabled = () =>
-  String(process.env.STT_PROVIDER || "azure").trim().toLowerCase() ===
+  String(process.env.STT_PROVIDER || "elevenlabs").trim().toLowerCase() ===
     "elevenlabs" && isElevenLabsConfigured();
 
 const requireKey = () => {

@@ -28,8 +28,9 @@ export const env = {
     expiresMinutes: Number(process.env.OTP_EXPIRES_MINUTES || 10),
   },
 
-  // Which vendor the scoring flows transcribe with: "azure" or "elevenlabs".
-  sttProvider: (process.env.STT_PROVIDER || "azure").toLowerCase(),
+  // Which vendor the scoring flows transcribe with: "elevenlabs" (default)
+  // or "azure".
+  sttProvider: (process.env.STT_PROVIDER || "elevenlabs").toLowerCase(),
 
   elevenLabs: {
     apiKey: process.env.ELEVENLABS_API_KEY || "",

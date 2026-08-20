@@ -1609,9 +1609,8 @@ export const runAiExam = async (req, res, next) => {
       language: stuLang,
     };
 
-    // Engine priority. Unchanged by default (Azure → Google → Whisper, with
-    // ElevenLabs as a last resort); STT_PROVIDER=elevenlabs promotes Scribe
-    // to first pick.
+    // Engine priority. Scribe is first by default; STT_PROVIDER=azure demotes
+    // it behind Azure → Google → Whisper without changing what is collected.
     const enginePriority = isElevenLabsSttEnabled()
       ? ["elevenlabs", "azure", "google", "whisper"]
       : ["azure", "google", "whisper", "elevenlabs"];
