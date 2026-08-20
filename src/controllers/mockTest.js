@@ -947,6 +947,57 @@ const whisperTranscribe = async ({ buffer, audioUrl, language }) => {
   return { text: json.text || "", insights: null };
 };
 
+/* ─── ElevenLabs Scribe (primary transcription service) ─── */
+const elevenlabsTranscribe = async ({ buffer, audioUrl, mimetype, language }) => {
+  const key = process.env.ELEVENLABS_API_KEY;
+  if (!key) {
+    console.error("[elevenlabs] No ELEVENLABS_API_KEY, cannot transcribe");
+    return null;
+  }
+
+  let audioBuffer = buffer;
+  let filename = "audio.wav";
+
+  if (!audioBuffer && audioUrl) {
+    const resp = await fetch(audioUrl);
+    if (!resp.ok) {
+      console.error("[elevenlabs] Failed to fetch audio:", resp.status);
+      return null;
+    }
+    audioBuffer = Buffer.from(await resp.arrayBuffer());
+    const ext = audioUrl.split("?")[0].split(".").pop() || "wav";
+    filename = `audio.${ext}`;
+  }
+
+  if (!audioBuffer || audioBuffer.length === 0) return null;
+
+  const langCode = toLanguageCode(language);
+  const form = new FormData();
+  form.append("file", new Blob([audioBuffer], { type: mimetype || "audio/wav" }), filename);
+  form.append("model_id", "scribe_v1");
+  if (langCode) form.append("language_code", langCode);
+
+  try {
+    const res = await fetch("https://api.elevenlabs.io/v1/speech-to-text", {
+      method: "POST",
+      headers: { "xi-api-key": key },
+      body: form,
+    });
+    if (!res.ok) {
+      const errText = await res.text();
+      console.error("[elevenlabs] API error:", errText?.substring(0, 200));
+      return null;
+    }
+    const json = await res.json();
+    const text = String(json.text || "").trim();
+    console.log("[elevenlabs] Result:", text?.substring(0, 100));
+    return { text, insights: null };
+  } catch (e) {
+    console.error("[elevenlabs] Exception:", e.message?.substring(0, 200));
+    return null;
+  }
+};
+
 /* ─── Google Translate helper (for auto-generating suggested translations) ─── */
 const googleTranslate = async (text, targetLang, sourceLang = null) => {
   const apiKey = process.env.GOOGLE_TRANSLATE_API_KEY;
@@ -1228,9 +1279,6 @@ export const runAiExam = async (req, res, next) => {
     const audioTranscript = req.body.audioTranscript
       ? String(req.body.audioTranscript)
       : null;
-    const translationText = req.body.translationText
-      ? String(req.body.translationText).trim()
-      : null;
     const authUserId = req.body.userId;
     if (!authUserId)
       return res.status(401).json({ success: false, message: "Unauthorized" });
@@ -1320,7 +1368,6 @@ export const runAiExam = async (req, res, next) => {
     console.log("[scoring] Starting Azure transcription...");
     console.log("[scoring] refAudioUrl:", referenceAudioUrl?.substring(0, 60) || "(none)");
     console.log("[scoring] sugAudioUrl:", suggestedAudioUrl?.substring(0, 60) || "(none)");
-    console.log("[scoring] translationText:", translationText?.substring(0, 60) || "(none)");
     console.log("[scoring] loteLocales:", loteLocales, "stuLocales:", stuLocales, "bothLocales:", bothLocales);
 
     let referenceTranscript = "";
@@ -1334,8 +1381,20 @@ export const runAiExam = async (req, res, next) => {
     // ─── Reference audio transcription ───
     if (referenceAudioUrl) {
       const refLang = isOddSegment ? "en" : langCode;
-      if (refLocales.length > 0) {
-        // Azure supports this locale
+
+      // Primary: ElevenLabs
+      try {
+        const elRef = await elevenlabsTranscribe({ audioUrl: referenceAudioUrl, language: refLang });
+        if (elRef?.text) {
+          referenceTranscript = elRef.text;
+          console.log("[scoring] ElevenLabs reference:", referenceTranscript?.substring(0, 80));
+        }
+      } catch (e) {
+        console.error("[scoring] ElevenLabs ref error:", e.message?.substring(0, 100));
+      }
+
+      // Fallback: Azure
+      if (!referenceTranscript && refLocales.length > 0) {
         try {
           azureRef = await transcribeWithAzure({ audioUrl: referenceAudioUrl, locales: bothLocales });
           referenceTranscript = azureRef?.text ? String(azureRef.text) : "";
@@ -1345,11 +1404,12 @@ export const runAiExam = async (req, res, next) => {
             azureRef = await transcribeWithAzure({ buffer: refAudio.buffer, mimetype: refAudio.mimetype, locales: bothLocales });
             referenceTranscript = azureRef?.text ? String(azureRef.text) : "";
           } catch (refErr) {
-            console.log("[scoring] Azure ref failed twice, Whisper fallback:", refErr.message?.substring(0, 100));
+            console.log("[scoring] Azure ref failed:", refErr.message?.substring(0, 100));
           }
         }
       }
-      // If Azure didn't produce a transcript (unsupported locale or failed), try Google STT then Whisper
+
+      // Fallback: Google STT
       if (!referenceTranscript) {
         const gRef = await googleSTT({ audioUrl: referenceAudioUrl, mimetype: "audio/webm", language: refLang });
         if (gRef?.text) {
@@ -1357,6 +1417,8 @@ export const runAiExam = async (req, res, next) => {
           console.log("[scoring] Google STT reference:", referenceTranscript?.substring(0, 80));
         }
       }
+
+      // Fallback: Whisper
       if (!referenceTranscript) {
         console.log("[scoring] Using Whisper for reference audio (lang:", refLang, ")");
         const wRef = await whisperTranscribe({ audioUrl: referenceAudioUrl, language: refLang });
@@ -1364,13 +1426,23 @@ export const runAiExam = async (req, res, next) => {
       }
     }
 
-    // ─── Suggested audio / translation text ───
-    if (translationText) {
-      suggestedTranscript = translationText;
-      console.log("✅ Using frontend-provided translationText as suggestedTranscript");
-    } else if (suggestedAudioUrl) {
+    // ─── Suggested audio transcription ───
+    if (suggestedAudioUrl) {
       const sugLang = isOddSegment ? langCode : "en";
-      if (sugLocales.length > 0) {
+
+      // Primary: ElevenLabs
+      try {
+        const elSug = await elevenlabsTranscribe({ audioUrl: suggestedAudioUrl, language: sugLang });
+        if (elSug?.text) {
+          suggestedTranscript = elSug.text;
+          console.log("[scoring] ElevenLabs suggested:", suggestedTranscript?.substring(0, 80));
+        }
+      } catch (e) {
+        console.error("[scoring] ElevenLabs sug error:", e.message?.substring(0, 100));
+      }
+
+      // Fallback: Azure
+      if (!suggestedTranscript && sugLocales.length > 0) {
         try {
           azureSug = await transcribeWithAzure({ audioUrl: suggestedAudioUrl, locales: bothLocales });
           suggestedTranscript = azureSug?.text ? String(azureSug.text) : "";
@@ -1380,10 +1452,12 @@ export const runAiExam = async (req, res, next) => {
             azureSug = await transcribeWithAzure({ buffer: sugAudio.buffer, mimetype: sugAudio.mimetype, locales: bothLocales });
             suggestedTranscript = azureSug?.text ? String(azureSug.text) : "";
           } catch (sugErr) {
-            console.log("[scoring] Azure sug failed twice, Whisper fallback:", sugErr.message?.substring(0, 100));
+            console.log("[scoring] Azure sug failed:", sugErr.message?.substring(0, 100));
           }
         }
       }
+
+      // Fallback: Google STT
       if (!suggestedTranscript) {
         const gSug = await googleSTT({ audioUrl: suggestedAudioUrl, mimetype: "audio/webm", language: sugLang });
         if (gSug?.text) {
@@ -1391,6 +1465,8 @@ export const runAiExam = async (req, res, next) => {
           console.log("[scoring] Google STT suggested:", suggestedTranscript?.substring(0, 80));
         }
       }
+
+      // Fallback: Whisper
       if (!suggestedTranscript) {
         console.log("[scoring] Using Whisper for suggested audio (lang:", sugLang, ")");
         const wSug = await whisperTranscribe({ audioUrl: suggestedAudioUrl, language: sugLang });
@@ -1399,33 +1475,49 @@ export const runAiExam = async (req, res, next) => {
     }
 
     // ─── Student audio transcription ───
-    if (stuLocales.length > 0) {
+    {
+      const stuLang = isOddSegment ? langCode : "en";
+
+      // Primary: ElevenLabs
       try {
-        azureStu = await transcribeWithAzure({
-          buffer: cleanBuffer,
-          mimetype: cleanMimetype,
-          locales: stuLocales,
-        });
-        studentTranscript = azureStu?.text ? String(azureStu.text) : "";
-      } catch (stuErr) {
-        console.error("[scoring] Azure student error:", stuErr.message?.substring(0, 100));
+        const elStu = await elevenlabsTranscribe({ buffer: cleanBuffer, mimetype: cleanMimetype, language: stuLang });
+        if (elStu?.text) {
+          studentTranscript = elStu.text;
+          console.log("[scoring] ElevenLabs student:", studentTranscript?.substring(0, 80));
+        }
+      } catch (e) {
+        console.error("[scoring] ElevenLabs student error:", e.message?.substring(0, 100));
       }
-    }
-    // Google Cloud STT fallback (better for Punjabi etc.)
-    if (!studentTranscript) {
-      const stuLang = isOddSegment ? langCode : "en";
-      const gStu = await googleSTT({ buffer: cleanBuffer, mimetype: cleanMimetype, language: stuLang });
-      if (gStu?.text) {
-        studentTranscript = gStu.text;
-        console.log("[scoring] Google STT student:", studentTranscript?.substring(0, 80));
+
+      // Fallback: Azure
+      if (!studentTranscript && stuLocales.length > 0) {
+        try {
+          azureStu = await transcribeWithAzure({
+            buffer: cleanBuffer,
+            mimetype: cleanMimetype,
+            locales: stuLocales,
+          });
+          studentTranscript = azureStu?.text ? String(azureStu.text) : "";
+        } catch (stuErr) {
+          console.error("[scoring] Azure student error:", stuErr.message?.substring(0, 100));
+        }
       }
-    }
-    // Whisper fallback if Azure didn't produce a student transcript
-    if (!studentTranscript) {
-      const stuLang = isOddSegment ? langCode : "en";
-      console.log("[scoring] Using Whisper for student audio (lang:", stuLang, ")");
-      const wStu = await whisperTranscribe({ buffer: cleanBuffer, language: stuLang });
-      studentTranscript = wStu.text;
+
+      // Fallback: Google STT
+      if (!studentTranscript) {
+        const gStu = await googleSTT({ buffer: cleanBuffer, mimetype: cleanMimetype, language: stuLang });
+        if (gStu?.text) {
+          studentTranscript = gStu.text;
+          console.log("[scoring] Google STT student:", studentTranscript?.substring(0, 80));
+        }
+      }
+
+      // Fallback: Whisper
+      if (!studentTranscript) {
+        console.log("[scoring] Using Whisper for student audio (lang:", stuLang, ")");
+        const wStu = await whisperTranscribe({ buffer: cleanBuffer, language: stuLang });
+        studentTranscript = wStu.text;
+      }
     }
 
     // ─── Convert transcripts to correct LOTE script (e.g. Devanagari→Gurmukhi for Punjabi) ───
@@ -1560,9 +1652,10 @@ export const runAiExam = async (req, res, next) => {
     // Calculate repeat counts for penalty assessment
     let repeatCount = 1;
     let dialogueRepeatTotal = 0;
+    const hasExamAttemptId = Boolean(SegmentAttempt?.rawAttributes?.examAttemptId);
+    const examAttemptId = toInt(req.body.examAttemptId);
+
     if (SegmentAttempt) {
-      const hasExamAttemptId = Boolean(SegmentAttempt?.rawAttributes?.examAttemptId);
-      const examAttemptId = toInt(req.body.examAttemptId);
       const whereForCount = { userId: authUserId, segmentId };
       if (hasExamAttemptId && examAttemptId) whereForCount.examAttemptId = examAttemptId;
       const prevMax = await SegmentAttempt.max("repeatCount", { where: whereForCount });
@@ -1573,6 +1666,26 @@ export const runAiExam = async (req, res, next) => {
       if (hasExamAttemptId && examAttemptId) dialogueWhere.examAttemptId = examAttemptId;
       const allAttempts = await SegmentAttempt.findAll({ where: dialogueWhere, attributes: ["repeatCount"] });
       dialogueRepeatTotal = allAttempts.filter((a) => a.repeatCount > 1).length;
+    }
+
+    // Save segment attempt to DB BEFORE scoring so audio and transcripts are never lost if AI scoring fails
+    let segmentAttempt = null;
+    if (SegmentAttempt) {
+      const baseData = {
+        userId: authUserId,
+        segmentId,
+        audioUrl: userAudioUrl,
+        userTranscription: studentTranscript,
+        referenceTranscript: referenceTranscript || null,
+        suggestedTranscript: suggestedTranscript || null,
+        questionAudioUrl: referenceAudioUrl || null,
+        suggestedAudioUrl: suggestedAudioUrl || null,
+        questionTranscript: segment.textContent || audioTranscript || null,
+        language: language,
+        repeatCount,
+      };
+      if (hasExamAttemptId) baseData.examAttemptId = examAttemptId || null;
+      segmentAttempt = await SegmentAttempt.create(baseData);
     }
 
     const scores = await scoreWithOpenAI({
@@ -1591,22 +1704,8 @@ export const runAiExam = async (req, res, next) => {
       finalScore: scores.final_score,
     });
 
-    let segmentAttempt = null;
-
-    if (SegmentAttempt) {
-      const hasExamAttemptId = Boolean(SegmentAttempt?.rawAttributes?.examAttemptId);
-      const examAttemptId = toInt(req.body.examAttemptId);
-
-      const data = {
-        userId: authUserId,
-        segmentId,
-        audioUrl: userAudioUrl,
-        userTranscription: studentTranscript,
-        referenceTranscript: referenceTranscript || null,
-        suggestedTranscript: suggestedTranscript || null,
-        questionAudioUrl: referenceAudioUrl || null,
-        suggestedAudioUrl: suggestedAudioUrl || null,
-        questionTranscript: segment.textContent || audioTranscript || null,
+    if (segmentAttempt) {
+      await segmentAttempt.update({
         aiScores: scores,
         accuracyScore: scores.accuracy_score,
         overallScore: scores.final_score,
@@ -1624,13 +1723,7 @@ export const runAiExam = async (req, res, next) => {
         totalRawScore: scores.total_raw_score ?? scores.rawScore,
         finalScore: scores.final_score ?? scores.finalScore,
         oneLineFeedback: scores.one_line_feedback ?? scores.examinerNotes,
-        language: language,
-        repeatCount,
-      };
-
-      if (hasExamAttemptId) data.examAttemptId = examAttemptId || null;
-
-      segmentAttempt = await SegmentAttempt.create(data);
+      });
     }
 
     return res.json({

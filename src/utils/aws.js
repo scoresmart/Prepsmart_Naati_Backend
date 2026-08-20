@@ -16,19 +16,22 @@ const allowedAudioMimeTypes = new Set([
   "audio/flac"
 ]);
 
+// Validate AWS config at import time so failures are visible immediately
+if (!process.env.AWS_REGION) {
+  console.error("[S3] FATAL: AWS_REGION env var is not set — S3 uploads will fail");
+}
+if (!process.env.AWS_S3_BUCKET_NAME) {
+  console.error("[S3] FATAL: AWS_S3_BUCKET_NAME env var is not set — S3 uploads will fail");
+}
+
 const s3 = new S3Client({
-  region: process.env.AWS_REGION,
-  maxAttempts: 2,
+  region: process.env.AWS_REGION || "ap-southeast-2",
+  maxAttempts: 2,                 // Reduce retries (default 3) to fail faster
   requestHandler: new NodeHttpHandler({
-    connectionTimeout: 5_000,
-    requestTimeout: 30_000,
+    connectionTimeout: 5000,
+    socketTimeout: 15000,         // Reduced from 30s to 15s
   }),
 });
-
-// Strip MIME type parameters (e.g. "audio/webm;codecs=opus" → "audio/webm")
-function getBaseMime(mimetype) {
-  return String(mimetype || "").split(";")[0].trim().toLowerCase();
-}
 
 function extFromMime(mimetype, originalname) {
   const map = {
@@ -44,8 +47,7 @@ function extFromMime(mimetype, originalname) {
     "audio/flac": ".flac"
   };
 
-  const base = getBaseMime(mimetype);
-  if (map[base]) return map[base];
+  if (map[mimetype]) return map[mimetype];
   const fromName = originalname ? path.extname(originalname).toLowerCase() : "";
   return fromName || "";
 }
@@ -54,40 +56,44 @@ export async function uploadAudioToS3({ buffer, mimetype, originalname, keyPrefi
   const bucket = process.env.AWS_S3_BUCKET_NAME;
   const region = process.env.AWS_REGION;
 
-  if (!bucket) throw new Error("AWS_S3_BUCKET_NAME is required");
-  if (!region) throw new Error("AWS_REGION is required");
-  if (!buffer) throw new Error("File buffer is empty — upload may have failed");
-  const baseMime = getBaseMime(mimetype);
-  if (!allowedAudioMimeTypes.has(baseMime)) throw new Error(`Unsupported audio type: ${mimetype}`);
+  if (!bucket) throw new Error("AWS_S3_BUCKET_NAME is not set — cannot upload to S3");
+  if (!region) throw new Error("AWS_REGION is not set — cannot upload to S3");
+  if (!buffer || buffer.length === 0) throw new Error("Empty file buffer — nothing to upload");
+  if (!allowedAudioMimeTypes.has(mimetype)) throw new Error(`Unsupported audio type: ${mimetype}`);
 
   const prefix = String(keyPrefix).replace(/^\/+|\/+$/g, "");
   const ext = extFromMime(mimetype, originalname);
   const key = `${prefix}/${randomUUID()}${ext}`;
 
-  console.log(`[S3] Uploading ${key} (${(buffer.length / 1024).toFixed(1)} KB, ${mimetype}) to ${bucket}`);
-  const start = Date.now();
+  console.log(`[S3] Uploading ${originalname} (${mimetype}, ${(buffer.length / 1024).toFixed(1)}KB) → s3://${bucket}/${key}`);
 
-  let res;
+  // Abort after 20 seconds to prevent indefinite hangs
+  const abortController = new AbortController();
+  const timeout = setTimeout(() => abortController.abort(), 20000);
+
   try {
-    res = await s3.send(
+    const res = await s3.send(
       new PutObjectCommand({
         Bucket: bucket,
         Key: key,
         Body: buffer,
         ContentType: mimetype
-      })
+      }),
+      { abortSignal: abortController.signal }
     );
+
+    const base = process.env.AWS_S3_PUBLIC_BASE_URL?.replace(/\/+$/g, "");
+    const url = base ? `${base}/${key}` : `https://${bucket}.s3.${region}.amazonaws.com/${key}`;
+
+    console.log(`[S3] Upload complete → ${url}`);
+    return { bucket, key, etag: res.ETag, url };
   } catch (err) {
-    const elapsed = ((Date.now() - start) / 1000).toFixed(1);
-    console.error(`[S3] Upload FAILED after ${elapsed}s — ${err.name}: ${err.message}`);
-    throw err;
+    if (err.name === "AbortError" || abortController.signal.aborted) {
+      throw new Error(`S3 upload timed out after 20 seconds. Check AWS credentials and bucket '${bucket}' in region '${region}'.`);
+    }
+    console.error(`[S3] Upload failed for ${originalname}:`, err.message);
+    throw new Error(`S3 upload failed: ${err.message}. Check AWS_REGION, AWS_S3_BUCKET_NAME, and AWS credentials.`);
+  } finally {
+    clearTimeout(timeout);
   }
-
-  const elapsed = ((Date.now() - start) / 1000).toFixed(1);
-  console.log(`[S3] Upload OK in ${elapsed}s — ETag: ${res.ETag}`);
-
-  const base = process.env.AWS_S3_PUBLIC_BASE_URL?.replace(/\/+$/g, "");
-  const url = base ? `${base}/${key}` : `https://${bucket}.s3.${region}.amazonaws.com/${key}`;
-
-  return { bucket, key, etag: res.ETag, url };
 }

@@ -219,14 +219,13 @@ export async function translateSegment(req, res, next) {
 
 export async function createSegment(req, res, next) {
   try {
-    const {
-      dialogueId,
-      textContent,
-      audioUrl,
-      suggestedAudioUrl,
-      segmentOrder,
-      translation,
-    } = req.body;
+    // Accept both camelCase and snake_case field names from frontend
+    const dialogueId = req.body.dialogueId ?? req.body.dialogue_id;
+    const textContent = req.body.textContent ?? req.body.text;
+    const segmentOrder = req.body.segmentOrder ?? req.body.segment_order;
+    const translation = req.body.translation;
+    const audioUrl = req.body.audioUrl ?? req.body.audio_url;
+    const suggestedAudioUrl = req.body.suggestedAudioUrl ?? req.body.suggested_audio_url;
 
     const dialogueIdNum = toInt(dialogueId);
     const segmentOrderNum = toInt(segmentOrder);
@@ -234,7 +233,7 @@ export async function createSegment(req, res, next) {
     if (!dialogueIdNum || !textContent || segmentOrderNum === undefined) {
       return res
         .status(400)
-        .json({ success: false, message: "Missing fields" });
+        .json({ success: false, message: "Missing fields (need dialogueId/dialogue_id, textContent/text, segmentOrder/segment_order)" });
     }
 
     const dialogue = await models.Dialogue.findByPk(dialogueIdNum);
@@ -243,30 +242,43 @@ export async function createSegment(req, res, next) {
         .status(400)
         .json({ success: false, message: "Invalid dialogueId" });
 
-    const audioFile = req.files?.audioUrl?.[0];
-    const suggestedFile = req.files?.suggestedAudioUrl?.[0];
+    // Accept both camelCase and snake_case file field names
+    const audioFile = req.files?.audioUrl?.[0] || req.files?.audio_file?.[0];
+    const suggestedFile = req.files?.suggestedAudioUrl?.[0] || req.files?.suggested_audio_file?.[0];
+
+    console.log(`[createSegment] dialogueId=${dialogueIdNum}, segmentOrder=${segmentOrderNum}, audioFile=${audioFile?.originalname || 'none'}, suggestedFile=${suggestedFile?.originalname || 'none'}`);
 
     let finalAudioUrl = audioUrl || null;
     let finalSuggestedAudioUrl = suggestedAudioUrl || null;
 
     if (audioFile) {
-      const up = await uploadAudioToS3({
-        buffer: audioFile.buffer,
-        mimetype: audioFile.mimetype,
-        originalname: audioFile.originalname,
-        keyPrefix: `dialogues/${dialogueIdNum}/segments/audio`,
-      });
-      finalAudioUrl = up.url;
+      try {
+        const up = await uploadAudioToS3({
+          buffer: audioFile.buffer,
+          mimetype: audioFile.mimetype,
+          originalname: audioFile.originalname,
+          keyPrefix: `dialogues/${dialogueIdNum}/segments/audio`,
+        });
+        finalAudioUrl = up.url;
+      } catch (uploadErr) {
+        console.error("[createSegment] audio upload failed:", uploadErr.message);
+        return res.status(502).json({ success: false, message: "Audio file upload failed" });
+      }
     }
 
     if (suggestedFile) {
-      const up = await uploadAudioToS3({
-        buffer: suggestedFile.buffer,
-        mimetype: suggestedFile.mimetype,
-        originalname: suggestedFile.originalname,
-        keyPrefix: `dialogues/${dialogueIdNum}/segments/suggested`,
-      });
-      finalSuggestedAudioUrl = up.url;
+      try {
+        const up = await uploadAudioToS3({
+          buffer: suggestedFile.buffer,
+          mimetype: suggestedFile.mimetype,
+          originalname: suggestedFile.originalname,
+          keyPrefix: `dialogues/${dialogueIdNum}/segments/suggested`,
+        });
+        finalSuggestedAudioUrl = up.url;
+      } catch (uploadErr) {
+        console.error("[createSegment] suggested audio upload failed:", uploadErr.message);
+        return res.status(502).json({ success: false, message: "Suggested audio file upload failed" });
+      }
     }
 
     const segment = await models.Segment.create({
@@ -280,7 +292,10 @@ export async function createSegment(req, res, next) {
 
     return res.status(201).json({ success: true, data: { segment } });
   } catch (e) {
-    console.log(e);
+    console.error("[createSegment] error:", e.message, e.name);
+    if (e.name === "SequelizeValidationError" || e.name === "SequelizeUniqueConstraintError") {
+      return res.status(400).json({ success: false, message: e.errors?.map(x => x.message).join(", ") || e.message });
+    }
     return next(e);
   }
 }
@@ -318,10 +333,15 @@ export async function updateSegment(req, res, next) {
     if (!segment)
       return res.status(404).json({ success: false, message: "Not found" });
 
-    const { textContent, audioUrl, suggestedAudioUrl, segmentOrder, translation } = req.body;
+    // Accept both camelCase and snake_case field names
+    const textContent = req.body.textContent ?? req.body.text;
+    const audioUrl = req.body.audioUrl ?? req.body.audio_url;
+    const suggestedAudioUrl = req.body.suggestedAudioUrl ?? req.body.suggested_audio_url;
+    const segmentOrder = req.body.segmentOrder ?? req.body.segment_order;
+    const translation = req.body.translation;
 
-    const audioFile = req.files?.audio?.[0];
-    const suggestedFile = req.files?.suggestedAudio?.[0];
+    const audioFile = req.files?.audioUrl?.[0] || req.files?.audio_file?.[0];
+    const suggestedFile = req.files?.suggestedAudioUrl?.[0] || req.files?.suggested_audio_file?.[0];
 
     if (textContent !== undefined) segment.textContent = textContent;
     if (translation !== undefined) segment.translation = translation || null;

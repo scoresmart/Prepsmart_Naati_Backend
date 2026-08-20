@@ -20,6 +20,15 @@ import "./models/index.js";
 // Start the server immediately
 app.listen(env.port, () => {
   console.log(`Server running on http://localhost:${env.port}\n`);
+
+  // Validate AWS config at startup so issues are visible immediately
+  const awsVars = ["AWS_REGION", "AWS_S3_BUCKET_NAME"];
+  const missing = awsVars.filter((k) => !process.env[k]);
+  if (missing.length) {
+    console.warn(`[WARN] Missing AWS env vars: ${missing.join(", ")} — S3 uploads will fail`);
+  } else {
+    console.log(`[AWS] Region=${process.env.AWS_REGION}, Bucket=${process.env.AWS_S3_BUCKET_NAME}`);
+  }
 });
 
 // Connect to DB in the background
