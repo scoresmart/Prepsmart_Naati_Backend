@@ -8,16 +8,30 @@
 
   export const app = express();
 
-  app.use(
-    cors({
-      origin: true,
-      credentials: true,
-      methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-      allowedHeaders: ["Content-Type", "Authorization", "Stripe-Signature"],
-    })
-  );
-  
-  app.options("*", cors({ origin: true, credentials: true }));
+  const ALLOWED_ORIGINS = [
+    "https://naati.prepsmart.au",
+    "http://localhost:8080",
+    "http://localhost:8083",
+    "http://localhost:5173",
+  ];
+
+  const corsOptions = {
+    origin: (origin, callback) => {
+      // allow requests with no origin (curl, mobile apps, etc.)
+      if (!origin || ALLOWED_ORIGINS.includes(origin)) {
+        callback(null, true);
+      } else {
+        callback(new Error(`CORS: origin ${origin} not allowed`));
+      }
+    },
+    credentials: true,
+    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "Authorization", "Stripe-Signature"],
+    optionsSuccessStatus: 204,
+  };
+
+  app.use(cors(corsOptions));
+  app.options("*", cors(corsOptions));
 
 
   app.post(

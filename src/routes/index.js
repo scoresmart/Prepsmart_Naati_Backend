@@ -19,6 +19,7 @@ import mockTestSessionTimeRoutes from "./mockTestSessionTime.routes.js";
 import userStatusRoutes from "./userStatus.routes.js";
 import dialogueAttemptsTimeRoutes from "./dialogueAttemptsTime.routes.js";
 import rapidReview from "./rapidReview.js";
+import transcriptionComparisonRoutes from "./transcriptionComparison.routes.js";
 apiRouter.get("/health", (req, res) => res.json({ success: true }));
 
 apiRouter.use("/auth", authRouter);
@@ -40,3 +41,4 @@ apiRouter.use("/mockTestSessionTime", mockTestSessionTimeRoutes);
 apiRouter.use("/status", userStatusRoutes);
 apiRouter.use("/dialogueTime", dialogueAttemptsTimeRoutes);
 apiRouter.use("/rapid-review", rapidReview);
+apiRouter.use("/transcription-comparison", transcriptionComparisonRoutes);
