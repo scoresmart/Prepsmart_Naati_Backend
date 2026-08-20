@@ -27,4 +27,15 @@ export const env = {
   otp: {
     expiresMinutes: Number(process.env.OTP_EXPIRES_MINUTES || 10),
   },
+
+  // Which vendor the scoring flows transcribe with: "azure" or "elevenlabs".
+  sttProvider: (process.env.STT_PROVIDER || "azure").toLowerCase(),
+
+  elevenLabs: {
+    apiKey: process.env.ELEVENLABS_API_KEY || "",
+    sttModel: process.env.ELEVENLABS_STT_MODEL || "scribe_v1",
+    ttsModel: process.env.ELEVENLABS_TTS_MODEL || "eleven_multilingual_v2",
+    ttsVoiceId: process.env.ELEVENLABS_TTS_VOICE_ID || "21m00Tcm4TlvDq8ikWAM",
+    ttsFormat: process.env.ELEVENLABS_TTS_FORMAT || "mp3_44100_128",
+  },
 };

@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>STT model comparison — PrepSmart NAATI</title>
+<link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div>
+    <h1>Speech-to-text model comparison</h1>
+    <p class="sub">Run the same user audio through every model, side by side. Local only — nothing here touches production.</p>
+  </div>
+  <div class="env" id="envBadge"></div>
+</header>
+
+<main>
+
+  <!-- 1 ─ models --------------------------------------------------- -->
+  <section class="card">
+    <div class="card-head">
+      <h2><span class="step">1</span> Pick the models</h2>
+      <div class="head-actions">
+        <button class="ghost" id="selectEnabled">Select all available</button>
+        <button class="ghost" id="clearModels">Clear</button>
+      </div>
+    </div>
+    <div id="providers" class="providers"></div>
+    <p class="hint" id="providerHint"></p>
+  </section>
+
+  <!-- 2 ─ audio ---------------------------------------------------- -->
+  <section class="card">
+    <div class="card-head">
+      <h2><span class="step">2</span> Load the user audio</h2>
+      <span class="counter" id="clipCounter">0 clips</span>
+    </div>
+
+    <div class="tabs">
+      <button class="tab active" data-tab="upload">Upload files</button>
+      <button class="tab" data-tab="urls">Paste S3 / URLs</button>
+    </div>
+
+    <div class="tab-body" id="tab-upload">
+      <div class="dropzone" id="dropzone">
+        <strong>Drop 10–15 audio files here</strong>
+        <span>or <button class="linklike" id="browseBtn">browse</button> — wav, mp3, webm, ogg, m4a, flac</span>
+        <input type="file" id="fileInput" multiple accept="audio/*,.webm,.m4a" hidden>
+      </div>
+    </div>
+
+    <div class="tab-body hidden" id="tab-urls">
+      <p class="hint">
+        One per line. Optional label after a <code>|</code> —
+        e.g. <code>https://bucket.s3.ap-southeast-2.amazonaws.com/audios/x.webm | User 3 — Hindi seg 2</code>.
+        Presigned or public URLs both work; the server fetches them.
+      </p>
+      <textarea id="urlInput" rows="6" placeholder="https://…/audio1.webm | User 1&#10;https://…/audio2.webm | User 2"></textarea>
+      <button class="primary" id="fetchUrls">Fetch these URLs</button>
+    </div>
+
+    <div id="clips" class="clips"></div>
+  </section>
+
+  <!-- 3 ─ run ------------------------------------------------------ -->
+  <section class="card">
+    <div class="card-head"><h2><span class="step">3</span> Run the comparison</h2></div>
+    <div class="runbar">
+      <label>Language
+        <select id="language"></select>
+      </label>
+      <label>Parallel requests
+        <select id="concurrency">
+          <option>2</option><option selected>4</option><option>6</option><option>8</option>
+        </select>
+      </label>
+      <button class="primary big" id="runBtn">Transcribe with all selected models</button>
+      <span class="estimate" id="estimate"></span>
+    </div>
+    <div id="runStatus" class="runstatus hidden"></div>
+  </section>
+
+  <!-- 4 ─ results -------------------------------------------------- -->
+  <section class="card hidden" id="resultsCard">
+    <div class="card-head">
+      <h2><span class="step">4</span> Results</h2>
+      <div class="head-actions">
+        <button class="ghost" id="rescoreBtn" title="Recompute WER after editing reference transcripts. Free — no API calls.">Re-score</button>
+        <a class="ghost" id="csvBtn" href="/api/export.csv">Export CSV</a>
+      </div>
+    </div>
+
+    <div id="verdict" class="verdict"></div>
+
+    <h3 class="section-title">Model leaderboard</h3>
+    <div class="table-scroll"><table id="leaderboard" class="leaderboard"></table></div>
+
+    <h3 class="section-title">Transcript matrix</h3>
+    <p class="hint">Every transcript is labelled with the model that produced it. Click a cell to expand it against the reference.</p>
+    <div class="table-scroll"><table id="matrix" class="matrix"></table></div>
+  </section>
+
+</main>
+
+<div id="modal" class="modal hidden">
+  <div class="modal-inner">
+    <div class="modal-head">
+      <div>
+        <h3 id="modalTitle"></h3>
+        <p class="sub" id="modalSub"></p>
+      </div>
+      <button class="ghost" id="modalClose">Close</button>
+    </div>
+    <div id="modalBody"></div>
+  </div>
+</div>
+
+<script type="module" src="/app.js"></script>
+</body>
+</html>

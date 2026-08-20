@@ -1,0 +1,6 @@
+.env
+audio/*
+!audio/.gitkeep
+results/*
+!results/.gitkeep
+node_modules/

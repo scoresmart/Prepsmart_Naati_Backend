@@ -1,0 +1,14 @@
+{
+  "name": "stt-benchmark",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Local-only harness for comparing speech-to-text models on real user audio. No runtime dependencies.",
+  "scripts": {
+    "start": "node server.mjs",
+    "dev": "node --watch server.mjs"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

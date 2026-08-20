@@ -22,6 +22,50 @@ const toInt = (v) => {
   return Number.isFinite(n) ? n : undefined;
 };
 
+const STT_ENGINES = ["azure", "google", "whisper"];
+
+/**
+ * Give the score card one stable shape for the per-engine transcripts.
+ * Attempts recorded before multi-engine transcription existed have no
+ * `stt_transcripts` row value — those report the single stored transcript as
+ * the primary and leave the other engines null, so the UI can tell "this engine
+ * produced nothing" apart from "this attempt predates the comparison".
+ */
+const normalizeSttTranscripts = (raw, fallbackTranscript) => {
+  let parsed = raw;
+  if (typeof parsed === "string") {
+    try {
+      parsed = JSON.parse(parsed);
+    } catch {
+      parsed = null;
+    }
+  }
+
+  if (!parsed || typeof parsed !== "object") {
+    return {
+      available: false,
+      primary: null,
+      primaryText: fallbackTranscript || null,
+      engines: STT_ENGINES.map((name) => ({ name, text: null, error: null })),
+    };
+  }
+
+  return {
+    available: true,
+    primary: parsed.primary || null,
+    primaryText: parsed.primaryText || fallbackTranscript || null,
+    language: parsed.language || null,
+    engines: STT_ENGINES.map((name) => ({
+      name,
+      text: parsed[name]?.text ?? null,
+      error: parsed[name]?.error ?? null,
+      locale: parsed[name]?.locale ?? parsed[name]?.locales ?? null,
+      model: parsed[name]?.model ?? null,
+      isPrimary: parsed.primary === name,
+    })),
+  };
+};
+
 export const createExam = async (req, res, next) => {
   try {
     return res.status(501).json({ message: "Not implemented" });
@@ -227,6 +271,7 @@ export const computeResult = async (req, res, next) => {
         plain.suggestedAudioUrl = plain.suggestedAudioUrl || origSeg.suggestedAudioUrl || null;
         plain.questionTranscript = plain.questionTranscript || origSeg.textContent || null;
       }
+      plain.sttTranscripts = normalizeSttTranscripts(plain.sttTranscripts, plain.userTranscription);
       return plain;
     });
 
