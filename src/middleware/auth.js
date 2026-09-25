@@ -12,6 +12,8 @@ export function requireAuth(req, res, next) {
 
   try {
     req.auth = verifyJwt(token);
+    // Controllers read req.user; expose the JWT identity there too.
+    req.user = { id: req.auth.userId, role: req.auth.role };
     return next();
   } catch {
     if (env.appEnv === "development") return next();

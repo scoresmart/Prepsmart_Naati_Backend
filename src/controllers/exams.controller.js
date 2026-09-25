@@ -83,17 +83,21 @@ export const listUserExams = async (req, res, next) => {
     if (req.user?.role === "admin") {
       const userIdNum = toInt(req.query.userId);
       if (userIdNum) where.userId = userIdNum;
-    } else {
+    } else if (req.user?.id) {
       where.userId = req.user.id;
+    } else {
+      return res.status(401).json({ success: false, message: "Unauthorized" });
     }
 
     const dialogueIdNum = toInt(req.query.dialogueId);
     if (dialogueIdNum) where.dialogueId = dialogueIdNum;
 
     if (req.query.status) where.status = req.query.status;
+    if (req.query.examType) where.examType = req.query.examType;
 
     const attempts = await ExamAttempt.findAll({
       where,
+      include: [{ model: Dialogue, attributes: ["id", "title"] }],
       order: [["createdAt", "DESC"]],
     });
 
@@ -105,7 +109,7 @@ export const listUserExams = async (req, res, next) => {
 
 export const getExam = async (req, res, next) => {
   try {
-    const examAttemptId = toInt(req.params.id);
+    const examAttemptId = toInt(req.params.examAttemptId ?? req.params.id);
     if (!examAttemptId)
       return res.status(400).json({ message: "Invalid exam id" });
 

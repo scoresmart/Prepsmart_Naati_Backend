@@ -345,7 +345,12 @@ export async function deleteDialogue(req, res, next) {
 
 export async function listDialogues(req, res, next) {
   try {
-    const userId = toInt(req.query.userId);
+    // Non-admins may only list dialogues (and unlock state) for themselves —
+    // otherwise any userId could be passed to borrow another plan's access.
+    const userId =
+      req.user && req.user.role !== "admin"
+        ? toInt(req.user.id)
+        : toInt(req.query.userId);
     const languageId = toInt(req.query.languageId);
 
     if (!userId)

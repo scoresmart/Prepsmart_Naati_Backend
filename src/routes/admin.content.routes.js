@@ -12,12 +12,19 @@ const upload = multer({
   });
 export const adminContentRouter = Router();
 import getDashboardStats from "../controllers/dashboard.controller.js";
+
+// Read-only content the user app also needs. Registered before the admin
+// guard: the language list is shown on the public signup page, and users
+// list dialogues for their own language (the controller pins userId to the
+// caller for non-admins).
+adminContentRouter.get("/languages", listLanguages);
+adminContentRouter.get("/dialogues", requireAuth, listDialogues);
+
 adminContentRouter.use(requireAuth, requireAdmin);
 
 adminContentRouter.get("/dashboard", getDashboardStats);
 
 adminContentRouter.post("/languages", createLanguage);
-adminContentRouter.get("/languages", listLanguages);
 adminContentRouter.get("/languages/:id", getLanguage);
 adminContentRouter.put("/languages/:id", updateLanguage);
 adminContentRouter.delete("/languages/:id", deleteLanguage);
@@ -29,7 +36,6 @@ adminContentRouter.put("/domains/:id", updateDomain);
 adminContentRouter.delete("/domains/:id", deleteDomain);
 
 adminContentRouter.post("/dialogues", createDialogue);
-adminContentRouter.get("/dialogues", listDialogues);
 adminContentRouter.get("/dialogues/:id", getDialogue);
 adminContentRouter.put("/dialogues/:id", updateDialogue);
 adminContentRouter.delete("/dialogues/:id", deleteDialogue);
